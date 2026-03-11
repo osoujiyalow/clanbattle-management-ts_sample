@@ -1,6 +1,7 @@
 # clanbattle-management-ts_sample
 
 Discord のクランバトル管理 Bot 用の最小構成 TypeScript サンプルです。
+hibiさんのハンナbotを元に作りました。
 
 このプロジェクトでは次を使用しています。
 
