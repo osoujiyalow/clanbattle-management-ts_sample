@@ -1,44 +1,47 @@
 # clanbattle-management-ts-sample
 
-Discord のクランバトル管理 Bot 用 TypeScript サンプルです。
-移植元で動いている実装を、公開 GitHub に載せられる形へ整えたものです。
+Discord サーバーでクランバトルの進行管理を行う TypeScript 製 Bot のサンプル実装です。
+スラッシュコマンド、リアクション、メッセージイベントを使って、メンバー管理、凸状況、ボス情報、持越し、進捗表示などを扱います。
 
-このプロジェクトでは次を使用しています。
+## Features
+
+- Discord スラッシュコマンドの登録
+- SQLite による実行時データの保存
+- クラン設定、メンバー、凸状況、ボス情報の管理
+- 進捗メッセージ、残凸メッセージ、サマリー表示の更新
+- ローカルログ出力
+- TypeScript / Vitest による型チェックとテスト
+
+## Tech Stack
 
 - TypeScript
+- Node.js
 - discord.js
 - SQLite via `better-sqlite3`
+- Vitest
+- ESLint
 
-## 公開前の注意
-
-- `.env`、Discord Bot token、実運用の SQLite DB、`logs/`、`node_modules/`、`dist/` はコミットしないでください。
-- `.env.example` にはダミー値だけを置いています。実際の token や guild id は `.env` にだけ入れてください。
-- GitHub Actions などの本番デプロイ設定は、この公開サンプルには含めない方針です。
-
-## できること
-
-- Discord のスラッシュコマンドを登録する
-- 実行時データを SQLite に保存する
-- クラン設定、メンバー、凸状況、ボス情報を管理する
-- ログをローカルの `logs/` ディレクトリに出力する
-- 移植元と同じテストを実行して、主要動作を確認する
-
-## 動作要件
+## Requirements
 
 - Node.js `24.14.0`
 - npm `11.9.0`
-- Discord Bot のトークン
-- テスト用の Discord サーバー
+- Discord Bot token
+- Bot を追加できる Discord サーバー
 
-## セットアップ
+Discord Developer Portal で、Bot に必要な Intent を有効にしてください。
 
-1. 依存関係をインストールします。
+- `GuildMembers`
+- `MessageContent`
+
+## Setup
+
+依存関係をインストールします。
 
 ```bash
 npm install
 ```
 
-2. ローカル用の `.env` を作成します。
+`.env.example` をコピーして `.env` を作成します。
 
 ```bash
 cp .env.example .env
@@ -50,12 +53,7 @@ Windows PowerShell の場合:
 Copy-Item .env.example .env
 ```
 
-3. `.env` を編集し、最低限次を設定します。
-
-- `DISCORD_TOKEN`
-- `GUILD_IDS`
-
-開発用の例:
+`.env` に Discord Bot token とテスト用サーバーの guild id を設定します。
 
 ```env
 DISCORD_TOKEN=replace-me
@@ -67,7 +65,9 @@ DEBUG=false
 NODE_ENV=development
 ```
 
-## 実行方法
+`GUILD_IDS` を設定すると、そのサーバー向けにコマンドが登録されるため、開発中の反映が速くなります。空にするとグローバルコマンド登録になります。
+
+## Usage
 
 開発実行:
 
@@ -87,6 +87,12 @@ npm run typecheck
 npm test
 ```
 
+Lint:
+
+```bash
+npm run lint
+```
+
 ビルド:
 
 ```bash
@@ -99,7 +105,7 @@ npm run build
 node dist/index.js
 ```
 
-## 主なコマンド
+## Commands
 
 - `/setup`
 - `/add`
@@ -115,9 +121,19 @@ node dist/index.js
 - `/bossinfo_edit`
 - `/calc_cot`
 
-## 補足
+## Security Notes
 
-- `.env`、`logs/`、`node_modules/`、`dist/`、ローカルの SQLite ファイルは `.gitignore` で除外されています。
-- `GUILD_IDS` を設定すると、そのギルド向けにコマンド登録されるため、開発時の反映が速くなります。
-- `GUILD_IDS` を空にするとグローバルコマンド登録になり、反映まで時間がかかることがあります。
-- この Bot はメッセージイベントとリアクションイベントを使うため、Discord Developer Portal 側で必要な Intent を有効化してください。
+次のファイルやディレクトリは公開リポジトリにコミットしないでください。
+
+- `.env`
+- Discord Bot token
+- 実運用の SQLite database
+- `logs/`
+- `node_modules/`
+- `dist/`
+
+`.env.example` にはダミー値のみを置いています。実際の token や guild id は `.env` にだけ設定してください。
+
+## Project Notes
+
+このリポジトリは公開サンプルとして使いやすいように、本番デプロイ設定や実運用データを含めていません。必要に応じて、利用する環境に合わせたデプロイ手順や運用ドキュメントを追加してください。
