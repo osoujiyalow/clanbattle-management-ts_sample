@@ -107,19 +107,27 @@ node dist/index.js
 
 ## Commands
 
-- `/setup`
-- `/add`
-- `/remove`
-- `/lap`
-- `/attack_declare`
-- `/attack_fin`
-- `/defeat_boss`
-- `/undo`
-- `/resend`
-- `/bossinfo_show`
-- `/bossinfo_export_json`
-- `/bossinfo_edit`
-- `/calc_cot`
+この Bot は次のスラッシュコマンドを登録します。
+
+| Command | Description |
+| --- | --- |
+| `/setup` | 管理用チャンネルをセットアップします。 |
+| `/add` | 凸管理対象のメンバーを追加します。 |
+| `/remove` | 凸管理対象のメンバーを削除します。 |
+| `/lap` | 周回数や対象ボスを変更します。 |
+| `/attack_declare` | メンバーの凸宣言を登録します。 |
+| `/attack_fin` | メンバーの凸完了を登録します。 |
+| `/defeat_boss` | ボス討伐を登録します。 |
+| `/undo` | 直近の操作を取り消します。 |
+| `/resend` | 進行用メッセージを再送します。 |
+| `/time` | オーバーキル時の持越し時間を計算します。 |
+| `/tl` | 持越秒数に合わせてTL時刻を変換します。 |
+| `/bossinfo_show` | サーバーごとのボスHP/段階設定を表示します。 |
+| `/bossinfo_export_json` | ボスHP/段階設定をJSONで出力します。 |
+| `/bossinfo_edit` | ボスHP/段階設定をウィザードで編集します。 |
+| `/adjust_remain_attack_count` | メンバーの残凸数を直接修正します。 |
+| `/correct_attack_kind` | 自分の攻撃の本戦・持越区分を入れ替えます。 |
+| `/admin_correct_attack_kind` | メンバー指定で攻撃の本戦・持越区分を入れ替えます。 |
 
 ## Security Notes
 
