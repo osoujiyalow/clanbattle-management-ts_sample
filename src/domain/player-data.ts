@@ -1,19 +1,22 @@
 import { EMOJIS } from "../constants/emojis.js";
 import { type Clock, getJstDateParts, now, systemClock } from "../shared/time.js";
-import type { AttackType } from "./attack-type.js";
+import {
+  normalizeAttackType,
+  type AttackType as AttackTypeValue,
+} from "./attack-type.js";
 import { ClanBattleData } from "./clan-battle-data.js";
 import type { OperationType } from "./operation-type.js";
 
 export interface CarryOverRecord {
-  attackType: AttackType;
+  attackType: AttackTypeValue;
   bossIndex: number;
-  carryOverTime: number;
   created: Date;
 }
 
 export interface PlayerDataSnapshot {
-  physicsAttack: number;
-  magicAttack: number;
+  battleAttackCount?: number;
+  physicsAttack?: number;
+  magicAttack?: number;
   carryOverList: CarryOverRecord[];
 }
 
@@ -27,8 +30,9 @@ export interface LogData {
 
 export interface PlayerDataRecord {
   userId: string;
-  physicsAttack: number;
-  magicAttack: number;
+  battleAttackCount?: number;
+  physicsAttack?: number;
+  magicAttack?: number;
   log: LogData[];
   carryOverList: CarryOverRecord[];
   rawLimitTimeText: string;
@@ -36,14 +40,14 @@ export interface PlayerDataRecord {
 }
 
 export interface CarryOverParams {
-  attackType: AttackType;
+  attackType: AttackTypeValue;
   bossIndex: number;
-  carryOverTime?: number;
   created?: Date;
 }
 
 export interface PlayerDataParams {
   userId: string;
+  battleAttackCount?: number;
   physicsAttack?: number;
   magicAttack?: number;
   log?: LogData[];
@@ -58,17 +62,19 @@ function cloneDate(date: Date): Date {
 
 function cloneCarryOverRecord(record: CarryOverRecord): CarryOverRecord {
   return {
-    attackType: record.attackType,
+    attackType: normalizeAttackType(record.attackType) ?? record.attackType,
     bossIndex: record.bossIndex,
-    carryOverTime: record.carryOverTime,
     created: cloneDate(record.created),
   };
 }
 
 function clonePlayerDataSnapshot(snapshot: PlayerDataSnapshot): PlayerDataSnapshot {
   return {
-    physicsAttack: snapshot.physicsAttack,
-    magicAttack: snapshot.magicAttack,
+    ...(snapshot.battleAttackCount !== undefined
+      ? { battleAttackCount: snapshot.battleAttackCount }
+      : {}),
+    ...(snapshot.physicsAttack !== undefined ? { physicsAttack: snapshot.physicsAttack } : {}),
+    ...(snapshot.magicAttack !== undefined ? { magicAttack: snapshot.magicAttack } : {}),
     carryOverList: snapshot.carryOverList.map(cloneCarryOverRecord),
   };
 }
@@ -166,15 +172,13 @@ export function createLimitTimeText(
 }
 
 export class CarryOver {
-  attackType: AttackType;
+  attackType: AttackTypeValue;
   bossIndex: number;
-  carryOverTime: number;
   created: Date;
 
   constructor(params: CarryOverParams) {
-    this.attackType = params.attackType;
+    this.attackType = normalizeAttackType(params.attackType) ?? params.attackType;
     this.bossIndex = params.bossIndex;
-    this.carryOverTime = params.carryOverTime ?? -1;
     this.created = params.created ? cloneDate(params.created) : now();
   }
 
@@ -186,37 +190,67 @@ export class CarryOver {
     return {
       attackType: this.attackType,
       bossIndex: this.bossIndex,
-      carryOverTime: this.carryOverTime,
       created: cloneDate(this.created),
     };
   }
 
   toString(): string {
-    const bossName =
-      ClanBattleData.bossNames[this.bossIndex] ?? `${this.bossIndex + 1}ボス`;
-    let text = `${formatJstHourMinute(this.created)}発生 ${bossName}`;
-
-    if (this.carryOverTime !== -1) {
-      text += ` ${this.carryOverTime}秒`;
+    if (this.bossIndex < 0) {
+      return `${formatJstHourMinute(this.created)}発生 管理補正持越し`;
     }
 
-    return `${text}持ち越し`;
+    const bossName =
+      ClanBattleData.bossNames[this.bossIndex] ?? `${this.bossIndex + 1}ボス`;
+    return `${formatJstHourMinute(this.created)}発生 ${bossName}持ち越し`;
   }
+}
+
+interface ResolvedBattleAttackCounters {
+  battleAttackCount: number;
+  physicsAttack: number;
+  magicAttack: number;
+}
+
+function resolveBattleAttackCounters(params: PlayerDataParams | PlayerDataRecord | PlayerDataSnapshot): ResolvedBattleAttackCounters {
+  const battleAttackCount = params.battleAttackCount;
+  const physicsAttack = params.physicsAttack;
+  const magicAttack = params.magicAttack;
+
+  if (physicsAttack !== undefined || magicAttack !== undefined) {
+    const resolvedPhysicsAttack = physicsAttack ?? 0;
+    const resolvedMagicAttack = magicAttack ?? 0;
+
+    return {
+      battleAttackCount: battleAttackCount ?? resolvedPhysicsAttack + resolvedMagicAttack,
+      physicsAttack: resolvedPhysicsAttack,
+      magicAttack: resolvedMagicAttack,
+    };
+  }
+
+  return {
+    battleAttackCount: battleAttackCount ?? 0,
+    physicsAttack: battleAttackCount ?? 0,
+    magicAttack: 0,
+  };
 }
 
 export class PlayerData {
   readonly userId: string;
-  physicsAttack: number;
-  magicAttack: number;
+  private _battleAttackCount: number;
+  private _physicsAttack: number;
+  private _magicAttack: number;
   log: LogData[];
   carryOverList: CarryOver[];
   rawLimitTimeText: string;
   taskKill: boolean;
 
   constructor(params: PlayerDataParams) {
+    const resolvedCounters = resolveBattleAttackCounters(params);
+
     this.userId = params.userId;
-    this.physicsAttack = params.physicsAttack ?? 0;
-    this.magicAttack = params.magicAttack ?? 0;
+    this._battleAttackCount = resolvedCounters.battleAttackCount;
+    this._physicsAttack = resolvedCounters.physicsAttack;
+    this._magicAttack = resolvedCounters.magicAttack;
     this.log = params.log?.map(cloneLogData) ?? [];
     this.carryOverList =
       params.carryOverList?.map((carryOver) => CarryOver.fromRecord(carryOver.toRecord())) ?? [];
@@ -227,8 +261,11 @@ export class PlayerData {
   static fromRecord(record: PlayerDataRecord): PlayerData {
     return new PlayerData({
       userId: record.userId,
-      physicsAttack: record.physicsAttack,
-      magicAttack: record.magicAttack,
+      ...(record.battleAttackCount !== undefined
+        ? { battleAttackCount: record.battleAttackCount }
+        : {}),
+      ...(record.physicsAttack !== undefined ? { physicsAttack: record.physicsAttack } : {}),
+      ...(record.magicAttack !== undefined ? { magicAttack: record.magicAttack } : {}),
       log: record.log,
       carryOverList: record.carryOverList.map((carryOver) => CarryOver.fromRecord(carryOver)),
       rawLimitTimeText: record.rawLimitTimeText,
@@ -236,9 +273,47 @@ export class PlayerData {
     });
   }
 
+  get battleAttackCount(): number {
+    return this._battleAttackCount;
+  }
+
+  set battleAttackCount(value: number) {
+    this._battleAttackCount = value;
+    this._physicsAttack = value;
+    this._magicAttack = 0;
+  }
+
+  get physicsAttack(): number {
+    return this._physicsAttack;
+  }
+
+  set physicsAttack(value: number) {
+    this._physicsAttack = value;
+    this._battleAttackCount = this._physicsAttack + this._magicAttack;
+  }
+
+  get magicAttack(): number {
+    return this._magicAttack;
+  }
+
+  set magicAttack(value: number) {
+    this._magicAttack = value;
+    this._battleAttackCount = this._physicsAttack + this._magicAttack;
+  }
+
+  incrementBattleAttackCount(): void {
+    if (this._battleAttackCount >= 3) {
+      return;
+    }
+
+    this._battleAttackCount += 1;
+    this._physicsAttack += 1;
+  }
+
   initializeAttack(): void {
-    this.physicsAttack = 0;
-    this.magicAttack = 0;
+    this._battleAttackCount = 0;
+    this._physicsAttack = 0;
+    this._magicAttack = 0;
     this.carryOverList = [];
     this.taskKill = false;
     this.rawLimitTimeText = "";
@@ -246,7 +321,7 @@ export class PlayerData {
   }
 
   createTxt(displayName: string, clock: Clock = systemClock): string {
-    let text = `${displayName}\t${EMOJIS.physics}${this.physicsAttack} ${EMOJIS.magic}${this.magicAttack}`;
+    let text = displayName;
 
     if (this.taskKill) {
       text += ` ${EMOJIS.taskKill}`;
@@ -264,9 +339,21 @@ export class PlayerData {
   }
 
   createSimpleTxt(displayName: string, clock: Clock = systemClock): string {
-    let text =
-      `\n　　- ${displayName} ` +
-      `(${this.physicsAttack + this.magicAttack}/3 物${this.physicsAttack}魔${this.magicAttack})`;
+    let text = `\n　　- ${displayName} (本戦凸 ${this.battleAttackCount}/3)`;
+
+    if (this.taskKill) {
+      text += ` ${EMOJIS.taskKill}`;
+    }
+
+    if (this.rawLimitTimeText) {
+      text += ` ${createLimitTimeText(this.rawLimitTimeText, clock)}`;
+    }
+
+    return text;
+  }
+
+  createCompactProgressTxt(displayName: string, clock: Clock = systemClock): string {
+    let text = `\n　　- ${displayName} (${this.battleAttackCount}/3)`;
 
     if (this.taskKill) {
       text += ` ${EMOJIS.taskKill}`;
@@ -280,13 +367,16 @@ export class PlayerData {
   }
 
   applySnapshot(snapshot: PlayerDataSnapshot): void {
-    this.physicsAttack = snapshot.physicsAttack;
-    this.magicAttack = snapshot.magicAttack;
+    const resolvedCounters = resolveBattleAttackCounters(snapshot);
+    this._battleAttackCount = resolvedCounters.battleAttackCount;
+    this._physicsAttack = resolvedCounters.physicsAttack;
+    this._magicAttack = resolvedCounters.magicAttack;
     this.carryOverList = snapshot.carryOverList.map((carryOver) => CarryOver.fromRecord(carryOver));
   }
 
   toSnapshot(): PlayerDataSnapshot {
     return {
+      battleAttackCount: this.battleAttackCount,
       physicsAttack: this.physicsAttack,
       magicAttack: this.magicAttack,
       carryOverList: this.carryOverList.map((carryOver) => carryOver.toRecord()),
@@ -296,6 +386,7 @@ export class PlayerData {
   toRecord(): PlayerDataRecord {
     return {
       userId: this.userId,
+      battleAttackCount: this.battleAttackCount,
       physicsAttack: this.physicsAttack,
       magicAttack: this.magicAttack,
       log: this.log.map(cloneLogData),

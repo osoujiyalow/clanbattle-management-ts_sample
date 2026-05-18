@@ -13,6 +13,10 @@ export const COMMAND_DESCRIPTIONS = {
   undo: "元に戻す処理を実施します。",
   resendProgressMessage: "進行用のメッセージを再送します。",
   calcCot: "オーバーキルでの持越し時間を計算します",
+  adjustRemainAttackCount: "メンバーの残凸数を直接修正します。",
+  correctAttackKind: "自分の攻撃の本戦・持越区分を入れ替えます。",
+  adminCorrectAttackKind: "メンバー指定で攻撃の本戦・持越区分を入れ替えます。",
+  tlConvert: "持越秒数ぶんTLの時刻をずらして表示します。",
 } as const;
 
 export const OPTION_DESCRIPTIONS = {
@@ -29,7 +33,7 @@ export const USER_MESSAGES = {
     bossNumberRequired: "ボス番号を指定してください",
     invalidBossNumber: "ボス番号が不適です。1から5までの整数を指定してください。",
     invalidLap: "不正な周回数です",
-    invalidAttackType: "攻撃種別が不正です。物理・魔法・持ち越しから選択してください。",
+    invalidAttackType: "攻撃種別が不正です。本戦凸・持越凸から選択してください。",
   },
   setup: {
     started: "チャンネルのセットアップを実施します",

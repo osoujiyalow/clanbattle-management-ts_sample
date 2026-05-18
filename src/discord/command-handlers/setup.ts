@@ -15,7 +15,7 @@ export interface SetupCommandHandlersOptions {
 }
 
 const SETUP_ADMIN_REQUIRED_MESSAGE =
-  "/setup \u306f\u7ba1\u7406\u8005\u6a29\u9650\u3092\u6301\u3064\u30e6\u30fc\u30b6\u30fc\u3060\u3051\u5b9f\u884c\u3067\u304d\u307e\u3059\u3002";
+  "/setup は管理者権限を持つユーザーだけ実行できます。";
 
 function hasAdministratorPermission(interaction: ChatInputCommandInteraction): boolean {
   return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false;
@@ -59,6 +59,9 @@ export function registerSetupCommandHandlers(
   router: InteractionRouter,
   options: SetupCommandHandlersOptions,
 ): void {
+  router.registerChatInputCommand("セットアップ", async (interaction) => {
+    await handleSetupCommand(interaction, options);
+  });
   router.registerChatInputCommand("setup", async (interaction) => {
     await handleSetupCommand(interaction, options);
   });

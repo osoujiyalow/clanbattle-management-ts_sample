@@ -1,7 +1,10 @@
 import { CarryOver } from "../../domain/player-data.js";
-import { parseAttackType } from "../../domain/attack-type.js";
 import type { PlayerData } from "../../domain/player-data.js";
 import type { SqliteDatabase } from "./db.js";
+import {
+  decodeAttackTypeFromStorage,
+  encodeAttackTypeForStorage,
+} from "./attack-type-storage.js";
 import {
   decodeSnowflake,
   decodeSqliteInteger,
@@ -14,12 +17,16 @@ interface CarryOverRow {
   user_id: bigint;
   boss_index: bigint;
   attack_type: string;
-  carry_over_time: bigint;
   created: string | Date;
 }
 
-const INSERT_CARRY_OVER_SQL = `insert into CarryOver values (
-  ?,
+const INSERT_CARRY_OVER_SQL = `insert into CarryOver (
+  category_id,
+  user_id,
+  boss_index,
+  attack_type,
+  created
+) values (
   ?,
   ?,
   ?,
@@ -29,7 +36,8 @@ const INSERT_CARRY_OVER_SQL = `insert into CarryOver values (
 
 const UPDATE_CARRY_OVER_SQL = `update CarryOver
 set
-  carry_over_time=?
+  boss_index=?,
+  attack_type=?
 where
   category_id=? and user_id=? and created=?`;
 
@@ -41,10 +49,16 @@ const DELETE_ALL_CARRY_OVER_SQL = `delete from CarryOver
 where
   category_id=? and user_id=?`;
 
-const SELECT_ALL_CARRY_OVER_SQL = "select * from CarryOver";
+const DELETE_CARRY_OVER_BY_CATEGORY_SQL = `delete from CarryOver
+where
+  category_id=?`;
+
+const SELECT_ALL_CARRY_OVER_SQL = `select *
+from CarryOver
+order by category_id asc, user_id asc, created asc`;
 
 function requireAttackType(value: string) {
-  const attackType = parseAttackType(value);
+  const attackType = decodeAttackTypeFromStorage(value);
 
   if (!attackType) {
     throw new Error(`unknown attack type: ${value}`);
@@ -61,15 +75,15 @@ export class CarryOverRepository {
       encodeSnowflake(categoryId),
       encodeSnowflake(userId),
       carryOver.bossIndex,
-      carryOver.attackType,
-      carryOver.carryOverTime,
+      encodeAttackTypeForStorage(carryOver.attackType),
       formatSqliteDateTime(carryOver.created),
     );
   }
 
   update(categoryId: string, userId: string, carryOver: CarryOver): void {
     this.database.prepare(UPDATE_CARRY_OVER_SQL).run(
-      carryOver.carryOverTime,
+      carryOver.bossIndex,
+      encodeAttackTypeForStorage(carryOver.attackType),
       encodeSnowflake(categoryId),
       encodeSnowflake(userId),
       formatSqliteDateTime(carryOver.created),
@@ -97,8 +111,7 @@ export class CarryOverRepository {
         encodeSnowflake(categoryId),
         encodeSnowflake(userId),
         carryOver.bossIndex,
-        carryOver.attackType,
-        carryOver.carryOverTime,
+        encodeAttackTypeForStorage(carryOver.attackType),
         formatSqliteDateTime(carryOver.created),
       );
     }
@@ -109,6 +122,10 @@ export class CarryOverRepository {
       encodeSnowflake(categoryId),
       encodeSnowflake(userId),
     );
+  }
+
+  deleteAllByCategory(categoryId: string): void {
+    this.database.prepare(DELETE_CARRY_OVER_BY_CATEGORY_SQL).run(encodeSnowflake(categoryId));
   }
 
   findAllGroupedByCategory(
@@ -136,7 +153,6 @@ export class CarryOverRepository {
         new CarryOver({
           attackType: requireAttackType(row.attack_type),
           bossIndex: decodeSqliteInteger(row.boss_index),
-          carryOverTime: decodeSqliteInteger(row.carry_over_time),
           created: parseSqliteDateTime(row.created),
         }),
       );

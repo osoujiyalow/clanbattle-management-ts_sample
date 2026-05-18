@@ -2,7 +2,6 @@ import { DEFAULT_BOSS_NAMES } from "../constants/bossinfo-defaults.js";
 import { type Clock, getClanBattleDayKeyFromClock, systemClock } from "../shared/time.js";
 import { BossStatusData } from "./boss-status-data.js";
 import type { PlayerData } from "./player-data.js";
-import type { ReserveData } from "./reserve-data.js";
 
 type BossMessageId = string | null;
 
@@ -11,13 +10,10 @@ export interface ClanDataParams {
   categoryId: string;
   bossChannelIds: readonly string[];
   remainAttackChannelId: string;
-  reserveChannelId: string;
   commandChannelId: string;
   summaryChannelId: string;
   playerDataMap?: ReadonlyMap<string, PlayerData>;
-  reserveList?: readonly ReserveData[][];
   bossStatusByLap?: ReadonlyMap<number, BossStatusData[]>;
-  reserveMessageIds?: readonly BossMessageId[];
   remainAttackMessageId?: BossMessageId;
   progressMessageIdsByLap?: ReadonlyMap<number, readonly BossMessageId[]>;
   summaryMessageIdsByLap?: ReadonlyMap<number, readonly BossMessageId[]>;
@@ -30,10 +26,8 @@ export interface ClanDataRecord {
   categoryId: string;
   bossChannelIds: string[];
   remainAttackChannelId: string;
-  reserveChannelId: string;
   commandChannelId: string;
   summaryChannelId: string;
-  reserveMessageIds: BossMessageId[];
   remainAttackMessageId: BossMessageId;
   progressMessageIdsByLap: Record<string, BossMessageId[]>;
   summaryMessageIdsByLap: Record<string, BossMessageId[]>;
@@ -62,16 +56,6 @@ function cloneMessageIdMap(
   });
 
   return nextMap;
-}
-
-function cloneReserveList(value: readonly ReserveData[][] | undefined): ReserveData[][] {
-  const reserveList = value ? value.map((bossReserveList) => [...bossReserveList]) : [];
-
-  while (reserveList.length < DEFAULT_BOSS_NAMES.length) {
-    reserveList.push([]);
-  }
-
-  return reserveList.slice(0, DEFAULT_BOSS_NAMES.length);
 }
 
 function cloneBossStatusMap(
@@ -103,14 +87,11 @@ export class ClanData {
   readonly categoryId: string;
   readonly bossChannelIds: string[];
   readonly remainAttackChannelId: string;
-  reserveChannelId: string;
   readonly commandChannelId: string;
   readonly summaryChannelId: string;
 
   readonly playerDataMap: Map<string, PlayerData>;
-  reserveList: ReserveData[][];
   bossStatusByLap: Map<number, BossStatusData[]>;
-  reserveMessageIds: BossMessageId[];
   remainAttackMessageId: BossMessageId;
   progressMessageIdsByLap: Map<number, BossMessageId[]>;
   summaryMessageIdsByLap: Map<number, BossMessageId[]>;
@@ -121,13 +102,10 @@ export class ClanData {
     this.categoryId = params.categoryId;
     this.bossChannelIds = [...params.bossChannelIds];
     this.remainAttackChannelId = params.remainAttackChannelId;
-    this.reserveChannelId = params.reserveChannelId;
     this.commandChannelId = params.commandChannelId;
     this.summaryChannelId = params.summaryChannelId;
     this.playerDataMap = new Map(params.playerDataMap);
-    this.reserveList = cloneReserveList(params.reserveList);
     this.bossStatusByLap = cloneBossStatusMap(params.bossStatusByLap);
-    this.reserveMessageIds = cloneBossMessageIds(params.reserveMessageIds);
     this.remainAttackMessageId = params.remainAttackMessageId ?? null;
     this.progressMessageIdsByLap = cloneMessageIdMap(params.progressMessageIdsByLap);
     this.summaryMessageIdsByLap = cloneMessageIdMap(params.summaryMessageIdsByLap);
@@ -140,10 +118,8 @@ export class ClanData {
       categoryId: record.categoryId,
       bossChannelIds: record.bossChannelIds,
       remainAttackChannelId: record.remainAttackChannelId,
-      reserveChannelId: record.reserveChannelId,
       commandChannelId: record.commandChannelId,
       summaryChannelId: record.summaryChannelId,
-      reserveMessageIds: record.reserveMessageIds,
       remainAttackMessageId: record.remainAttackMessageId,
       progressMessageIdsByLap: new Map(
         Object.entries(record.progressMessageIdsByLap).map(([lap, messageIds]) => [
@@ -224,22 +200,14 @@ export class ClanData {
     this.summaryMessageIdsByLap = new Map();
   }
 
-  retireLegacyReserve(): void {
-    this.reserveChannelId = "0";
-    this.reserveList = cloneReserveList(undefined);
-    this.reserveMessageIds = cloneBossMessageIds(undefined);
-  }
-
   toRecord(): ClanDataRecord {
     return {
       guildId: this.guildId,
       categoryId: this.categoryId,
       bossChannelIds: [...this.bossChannelIds],
       remainAttackChannelId: this.remainAttackChannelId,
-      reserveChannelId: this.reserveChannelId,
       commandChannelId: this.commandChannelId,
       summaryChannelId: this.summaryChannelId,
-      reserveMessageIds: cloneBossMessageIds(this.reserveMessageIds),
       remainAttackMessageId: this.remainAttackMessageId,
       progressMessageIdsByLap: Object.fromEntries(
         [...this.progressMessageIdsByLap.entries()].map(([lap, messageIds]) => [

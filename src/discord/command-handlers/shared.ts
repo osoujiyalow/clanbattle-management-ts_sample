@@ -1,8 +1,10 @@
 import {
+  type ActionRowBuilder,
   type APIEmbed,
   ChannelType,
   DiscordAPIError,
   MessageFlags,
+  type MessageActionRowComponentBuilder,
   type JSONEncodable,
   type APIRole,
   type CategoryChannel,
@@ -48,6 +50,11 @@ interface SendableInteraction {
   reply(payload: ReplyPayload): Promise<unknown>;
   editReply(payload: EditReplyPayload): Promise<unknown>;
   followUp(payload: ReplyPayload): Promise<unknown>;
+  deleteReply?(): Promise<unknown>;
+}
+
+interface DeleteableResponse {
+  delete(): Promise<unknown>;
 }
 
 function formatInteractionResponsePayload(payload: { content?: string }, ephemeral: boolean): ReplyPayload {
@@ -61,6 +68,36 @@ function formatInteractionEditPayload(payload: { content?: string }): EditReplyP
   return {
     content: payload.content ?? null,
   };
+}
+
+function scheduleTransientInteractionDeletion(
+  interaction: SendableInteraction,
+  response: unknown,
+  deleteAfterMs: number,
+): void {
+  const isDeleteableResponse = (value: unknown): value is DeleteableResponse =>
+    typeof value === "object" &&
+    value !== null &&
+    "delete" in value &&
+    typeof value.delete === "function";
+
+  const deleteableResponse =
+    isDeleteableResponse(response)
+      ? response
+      : null;
+
+  if (deleteableResponse) {
+    setTimeout(() => {
+      void deleteableResponse.delete().catch(() => {});
+    }, deleteAfterMs);
+    return;
+  }
+
+  if (typeof interaction.deleteReply === "function") {
+    setTimeout(() => {
+      void interaction.deleteReply?.().catch(() => {});
+    }, deleteAfterMs);
+  }
 }
 
 export async function deferChatInputReply(
@@ -112,6 +149,14 @@ export async function resolveMemberIdentity(
   guild: Guild,
   user: User,
 ): Promise<DiscordMemberIdentity> {
+  const cachedMember = guild.members.cache.get(user.id);
+  if (cachedMember) {
+    return {
+      id: user.id,
+      displayName: resolvePreferredGuildMemberDisplayName(cachedMember),
+    };
+  }
+
   const guildMember = await guild.members.fetch(user.id).catch(() => null);
   return {
     id: user.id,
@@ -132,8 +177,7 @@ export async function resolveRoleMembers(
     }));
   }
 
-  const members = await guild.members.fetch();
-  return members
+  return guild.members.cache
     .filter((member) => member.roles.cache.has(role.id))
     .map((member) => ({
       id: member.id,
@@ -142,12 +186,7 @@ export async function resolveRoleMembers(
 }
 
 export async function resolveGuildDisplayNames(guild: Guild): Promise<ReadonlyMap<string, string>> {
-  const members = await guild.members.fetch();
-  return new Map(
-    Array.from(members.values()).map(
-      (member) => [member.id, resolvePreferredGuildMemberDisplayName(member)] as const,
-    ),
-  );
+  return resolveCachedGuildDisplayNames(guild);
 }
 
 export function resolveCachedGuildDisplayNames(guild: Guild): ReadonlyMap<string, string> {
@@ -156,6 +195,45 @@ export function resolveCachedGuildDisplayNames(guild: Guild): ReadonlyMap<string
       (member) => [member.id, resolvePreferredGuildMemberDisplayName(member)] as const,
     ),
   );
+}
+
+export async function resolveGuildDisplayNamesForUserIds(
+  guild: Guild,
+  userIds: Iterable<string>,
+): Promise<ReadonlyMap<string, string>> {
+  const displayNamesByUserId = new Map<string, string>();
+  const missingUserIds: string[] = [];
+
+  for (const userId of new Set(userIds)) {
+    const cachedMember = guild.members.cache.get(userId);
+    if (cachedMember) {
+      displayNamesByUserId.set(userId, resolvePreferredGuildMemberDisplayName(cachedMember));
+      continue;
+    }
+
+    missingUserIds.push(userId);
+  }
+
+  if (missingUserIds.length === 0) {
+    return displayNamesByUserId;
+  }
+
+  try {
+    const fetchedMembers = await guild.members.fetch({ user: missingUserIds });
+    for (const member of fetchedMembers.values()) {
+      displayNamesByUserId.set(member.id, resolvePreferredGuildMemberDisplayName(member));
+    }
+    return displayNamesByUserId;
+  } catch {
+    for (const userId of missingUserIds) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        displayNamesByUserId.set(userId, resolvePreferredGuildMemberDisplayName(member));
+      }
+    }
+
+    return displayNamesByUserId;
+  }
 }
 
 export interface ManagedInteractionContext {
@@ -257,9 +335,13 @@ class DiscordMessageAdapter {
     await this.message.react(emoji);
   }
 
-  async edit(payload: { embeds?: readonly (APIEmbed | JSONEncodable<APIEmbed>)[] }): Promise<void> {
+  async edit(payload: {
+    embeds?: readonly (APIEmbed | JSONEncodable<APIEmbed>)[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
+  }): Promise<void> {
     await this.message.edit({
       ...(payload.embeds ? { embeds: payload.embeds } : {}),
+      ...(payload.components ? { components: payload.components } : {}),
     });
   }
 
@@ -282,10 +364,12 @@ export class DiscordTextChannelAdapter {
   async send(payload: {
     content?: string;
     embeds?: readonly (APIEmbed | JSONEncodable<APIEmbed>)[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
   }): Promise<DiscordMessageAdapter> {
     const message = await this.channel.send({
       ...(payload.content ? { content: payload.content } : {}),
       ...(payload.embeds ? { embeds: payload.embeds } : {}),
+      ...(payload.components ? { components: payload.components } : {}),
     });
     return new DiscordMessageAdapter(message);
   }
@@ -293,6 +377,7 @@ export class DiscordTextChannelAdapter {
   async sendMessage(payload: {
     content?: string;
     embeds?: readonly (APIEmbed | JSONEncodable<APIEmbed>)[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
   }): Promise<DiscordMessageAdapter> {
     return this.send(payload);
   }
@@ -427,6 +512,19 @@ export class SlashResponseChannelAdapter {
     }
 
     await this.interaction.followUp(normalizedPayload);
+  }
+
+  async sendTransient(payload: { content?: string }, deleteAfterMs = 15_000): Promise<void> {
+    const normalizedPayload = formatInteractionResponsePayload(payload, true);
+
+    if (!this.interaction.deferred && !this.interaction.replied) {
+      const response = await this.interaction.reply(normalizedPayload);
+      scheduleTransientInteractionDeletion(this.interaction, response, deleteAfterMs);
+      return;
+    }
+
+    const response = await this.interaction.followUp(normalizedPayload);
+    scheduleTransientInteractionDeletion(this.interaction, response, deleteAfterMs);
   }
 }
 

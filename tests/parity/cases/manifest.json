@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-03-08",
+  "rawCatalog": "tests/parity/fixtures/raw/cases.json",
+  "verifiedCatalog": "tests/parity/fixtures/verified/cases.json",
+  "requiredCaseIds": [
+    "setup/basic",
+    "add/member-self",
+    "attack_declare/basic",
+    "message_damage/basic",
+    "attack_fin/basic",
+    "defeat_boss/basic",
+    "undo/basic",
+    "bossinfo_edit/basic"
+  ],
+  "cases": [
+    {
+      "id": "setup/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "channel-order",
+        "reaction-set",
+        "lap-1-bootstrap"
+      ]
+    },
+    {
+      "id": "add/member-self",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "public-reply-template",
+        "playerdata-insert",
+        "remain-attack-refresh"
+      ]
+    },
+    {
+      "id": "attack_declare/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "declare-reply-template",
+        "progress-redraw",
+        "attackstatus-insert"
+      ]
+    },
+    {
+      "id": "message_damage/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "silent-handler",
+        "damage-parser",
+        "attackstatus-update"
+      ]
+    },
+    {
+      "id": "attack_fin/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "finish-reply-template",
+        "remain-refresh",
+        "playerdata-update"
+      ]
+    },
+    {
+      "id": "defeat_boss/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "defeat-state",
+        "next-lap-bootstrap",
+        "carry-over-creation"
+      ]
+    },
+    {
+      "id": "undo/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "undo-reply-template",
+        "attackstatus-reversal",
+        "boss-scoped-undo",
+        "projection-rebuild"
+      ]
+    },
+    {
+      "id": "bossinfo_edit/basic",
+      "raw": true,
+      "verified": true,
+      "reviewedUi": true,
+      "reviewedDb": true,
+      "parityFocus": [
+        "ephemeral-wizard-flow",
+        "save-confirmation",
+        "guild-bossinfo-upsert"
+      ]
+    }
+  ]
+}

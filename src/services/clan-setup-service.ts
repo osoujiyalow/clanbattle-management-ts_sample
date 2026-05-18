@@ -1,10 +1,16 @@
-import type { EmbedBuilder } from "discord.js";
+import type {
+  ActionRowBuilder,
+  EmbedBuilder,
+  MessageActionRowComponentBuilder,
+} from "discord.js";
 
 import { EMOJIS } from "../constants/emojis.js";
 import { USER_MESSAGES } from "../constants/messages.js";
 import { ClanData } from "../domain/clan-data.js";
+import { createProgressActionComponents } from "../discord/progress-action-buttons.js";
 import { renderProgressEmbed } from "../renderers/progress-renderer.js";
 import { renderRemainAttackEmbed } from "../renderers/remain-attack-renderer.js";
+import { renderSummaryOverviewEmbed } from "../renderers/summary-overview-renderer.js";
 import { BossStatusRepository } from "../repositories/sqlite/boss-status-repository.js";
 import {
   ProgressMessageIdRepository,
@@ -15,23 +21,17 @@ import { runInTransaction, type SqliteDatabase } from "../repositories/sqlite/db
 import type { Logger } from "../shared/logger.js";
 import { type Clock, systemClock } from "../shared/time.js";
 import type { RuntimeStateService } from "./runtime-state-service.js";
+import { createSummaryOverviewMessageIds } from "./summary-overview-tracking.js";
 
 const DEFAULT_CATEGORY_NAME = "凸管理";
-const SUMMARY_CHANNEL_NAME = "まとめ";
+const SUMMARY_CHANNEL_NAME = "進行把握板";
 const COMMAND_CHANNEL_NAME = "コマンド入力板";
 const CHAT_CHANNEL_NAME = "クラバト雑談";
 const REMAIN_ATTACK_CHANNEL_NAME = "残凸把握板";
+const TL_CONVERSION_CHANNEL_NAME = "持越変換";
+const TL_CONVERSION_CHANNEL_GUIDE = "/tlコマンドでTL変換できます。";
 const BOSS_CHANNEL_NAMES = ["ボス1", "ボス2", "ボス3", "ボス4", "ボス5"] as const;
 const SETUP_CREATION_FAILED_PREFIX = "チャンネルの作成に失敗しました";
-
-const PROGRESS_REACTIONS = [
-  EMOJIS.physics,
-  EMOJIS.magic,
-  EMOJIS.carryover,
-  EMOJIS.attack,
-  EMOJIS.lastAttack,
-  EMOJIS.reverse,
-] as const;
 
 const NOOP_LOGGER: Logger = {
   debug() {},
@@ -70,6 +70,7 @@ export interface SetupMessage {
 export interface SetupSendPayload {
   content?: string;
   embeds?: readonly EmbedBuilder[];
+  components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
 }
 
 export interface SetupTextChannel {
@@ -106,6 +107,7 @@ export interface ClanSetupResult {
   chatChannel: SetupTextChannel;
   bossChannels: readonly SetupTextChannel[];
   remainAttackChannel: SetupTextChannel;
+  tlConversionChannel: SetupTextChannel;
 }
 
 export interface ClanSetupServiceOptions {
@@ -139,6 +141,10 @@ function buildRemainAttackEmbed(clanData: ClanData, clock: Clock): EmbedBuilder 
     displayNamesByUserId: new Map(),
     clock,
   });
+}
+
+function buildSummaryOverviewEmbed(clanData: ClanData): EmbedBuilder {
+  return renderSummaryOverviewEmbed(clanData);
 }
 
 export class ClanSetupService {
@@ -177,16 +183,13 @@ export class ClanSetupService {
     let commandChannel: SetupTextChannel;
     let chatChannel: SetupTextChannel;
     let remainAttackChannel: SetupTextChannel;
+    let tlConversionChannel: SetupTextChannel;
     const bossChannels: SetupTextChannel[] = [];
 
     try {
       category = await request.guild.createCategory(categoryName);
       createdResources.category = category;
 
-      summaryChannel = await category.createTextChannel(SUMMARY_CHANNEL_NAME);
-      createdResources.channels.push(summaryChannel);
-      commandChannel = await category.createTextChannel(COMMAND_CHANNEL_NAME);
-      createdResources.channels.push(commandChannel);
       chatChannel = await category.createTextChannel(CHAT_CHANNEL_NAME);
       createdResources.channels.push(chatChannel);
 
@@ -196,17 +199,23 @@ export class ClanSetupService {
         createdResources.channels.push(bossChannel);
       }
 
+      summaryChannel = await category.createTextChannel(SUMMARY_CHANNEL_NAME);
+      createdResources.channels.push(summaryChannel);
       remainAttackChannel = await category.createTextChannel(REMAIN_ATTACK_CHANNEL_NAME);
       createdResources.channels.push(remainAttackChannel);
+      commandChannel = await category.createTextChannel(COMMAND_CHANNEL_NAME);
+      createdResources.channels.push(commandChannel);
+      tlConversionChannel = await category.createTextChannel(TL_CONVERSION_CHANNEL_NAME);
+      createdResources.channels.push(tlConversionChannel);
 
       const clanData = new ClanData({
         guildId: request.guild.id,
         categoryId: category.id,
         bossChannelIds: bossChannels.map((channel) => channel.id),
         remainAttackChannelId: remainAttackChannel.id,
-        reserveChannelId: "0",
         commandChannelId: commandChannel.id,
         summaryChannelId: summaryChannel.id,
+        clock: this.clock,
       });
 
       clanData.progressMessageIdsByLap.set(1, [null, null, null, null, null]);
@@ -215,30 +224,25 @@ export class ClanSetupService {
       for (let bossIndex = 0; bossIndex < bossChannels.length; bossIndex += 1) {
         const progressMessage = await bossChannels[bossIndex]!.send({
           embeds: [buildProgressEmbed(clanData, bossIndex)],
+          components: createProgressActionComponents(),
         });
         clanData.progressMessageIdsByLap.get(1)![bossIndex] = progressMessage.id;
-
-        for (const emoji of PROGRESS_REACTIONS) {
-          await progressMessage.addReaction(emoji);
-        }
-
-        if (!clanData.summaryMessageIdsByLap.has(1)) {
-          clanData.summaryMessageIdsByLap.set(1, [null, null, null, null, null]);
-
-          for (let summaryBossIndex = 0; summaryBossIndex < bossChannels.length; summaryBossIndex += 1) {
-            const summaryMessage = await summaryChannel.send({
-              embeds: [buildProgressEmbed(clanData, summaryBossIndex)],
-            });
-            clanData.summaryMessageIdsByLap.get(1)![summaryBossIndex] = summaryMessage.id;
-          }
-        }
       }
+
+      const summaryMessage = await summaryChannel.send({
+        embeds: [buildSummaryOverviewEmbed(clanData)],
+      });
+      clanData.summaryMessageIdsByLap.set(1, createSummaryOverviewMessageIds(summaryMessage.id));
 
       const remainAttackMessage = await remainAttackChannel.send({
         embeds: [buildRemainAttackEmbed(clanData, this.clock)],
       });
       clanData.remainAttackMessageId = remainAttackMessage.id;
       await remainAttackMessage.addReaction(EMOJIS.taskKill);
+
+      await tlConversionChannel.send({
+        content: TL_CONVERSION_CHANNEL_GUIDE,
+      });
 
       runInTransaction(this.options.database, () => {
         this.clanRepository.insert(clanData);
@@ -269,6 +273,7 @@ export class ClanSetupService {
         chatChannel,
         bossChannels,
         remainAttackChannel,
+        tlConversionChannel,
       };
     } catch (error) {
       await this.rollbackCreatedResources(createdResources);

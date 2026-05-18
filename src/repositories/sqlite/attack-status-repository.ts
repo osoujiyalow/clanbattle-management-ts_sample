@@ -1,7 +1,10 @@
-import { parseAttackType } from "../../domain/attack-type.js";
 import { AttackStatus } from "../../domain/attack-status.js";
-import type { PlayerData } from "../../domain/player-data.js";
+import { PlayerData } from "../../domain/player-data.js";
 import type { SqliteDatabase } from "./db.js";
+import {
+  decodeAttackTypeFromStorage,
+  encodeAttackTypeForStorage,
+} from "./attack-type-storage.js";
 import {
   decodeSnowflake,
   decodeSqliteBoolean,
@@ -58,11 +61,14 @@ where
   category_id=? and user_id=? and lap=? and boss_index=? and created=?`;
 
 const DELETE_ALL_ATTACK_STATUS_SQL = "delete from AttackStatus where category_id=?";
+const DELETE_ATTACK_STATUS_BY_BOSS_SQL = `delete from AttackStatus
+where
+  category_id=? and boss_index=?`;
 
 const SELECT_ALL_ATTACK_STATUS_SQL = "select * from AttackStatus";
 
 function requireAttackType(value: string) {
-  const attackType = parseAttackType(value);
+  const attackType = decodeAttackTypeFromStorage(value);
 
   if (!attackType) {
     throw new Error(`unknown attack type: ${value}`);
@@ -83,7 +89,7 @@ export class AttackStatusRepository {
       attackStatus.damage,
       attackStatus.memo,
       encodeSqliteBoolean(attackStatus.attacked),
-      attackStatus.attackType,
+      encodeAttackTypeForStorage(attackStatus.attackType),
       encodeSqliteBoolean(attackStatus.carryOver),
       formatSqliteDateTime(attackStatus.created),
     );
@@ -94,7 +100,7 @@ export class AttackStatusRepository {
       attackStatus.damage,
       attackStatus.memo,
       encodeSqliteBoolean(attackStatus.attacked),
-      attackStatus.attackType,
+      encodeAttackTypeForStorage(attackStatus.attackType),
       encodeSqliteBoolean(attackStatus.carryOver),
       encodeSnowflake(categoryId),
       encodeSnowflake(attackStatus.playerData.userId),
@@ -128,23 +134,38 @@ export class AttackStatusRepository {
     this.database.prepare(DELETE_ALL_ATTACK_STATUS_SQL).run(encodeSnowflake(categoryId));
   }
 
+  deleteByBossIndex(categoryId: string, bossIndex: number): void {
+    this.database.prepare(DELETE_ATTACK_STATUS_BY_BOSS_SQL).run(
+      encodeSnowflake(categoryId),
+      bossIndex,
+    );
+  }
+
   findAllGroupedByCategory(
     playerMapByCategory: ReadonlyMap<string, ReadonlyMap<string, PlayerData>>,
   ): Map<string, Map<number, Map<number, AttackStatus[]>>> {
     const rows = this.database.prepare<[], AttackStatusRow>(SELECT_ALL_ATTACK_STATUS_SQL).all();
     const statusMapByCategory = new Map<string, Map<number, Map<number, AttackStatus[]>>>();
+    const detachedPlayerMapByCategory = new Map<string, Map<string, PlayerData>>();
 
     for (const row of rows) {
       const categoryId = decodeSnowflake(row.category_id);
+      const userId = decodeSnowflake(row.user_id);
       const playerMap = playerMapByCategory.get(categoryId);
+      let playerData = playerMap?.get(userId);
 
-      if (!playerMap) {
+      if (!playerData && !decodeSqliteBoolean(row.attacked)) {
         continue;
       }
 
-      const playerData = playerMap.get(decodeSnowflake(row.user_id));
       if (!playerData) {
-        continue;
+        const detachedPlayerMap = detachedPlayerMapByCategory.get(categoryId) ?? new Map<string, PlayerData>();
+        playerData = detachedPlayerMap.get(userId);
+        if (!playerData) {
+          playerData = new PlayerData({ userId });
+          detachedPlayerMap.set(userId, playerData);
+          detachedPlayerMapByCategory.set(categoryId, detachedPlayerMap);
+        }
       }
 
       const lap = decodeSqliteInteger(row.lap);

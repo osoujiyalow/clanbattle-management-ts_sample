@@ -1,0 +1,180 @@
+{
+  "setup/basic": {
+    "ui": {
+      "messageSequence": [
+        "\u30c1\u30e3\u30f3\u30cd\u30eb\u306e\u30bb\u30c3\u30c8\u30a2\u30c3\u30d7\u3092\u5b9f\u65bd\u3057\u307e\u3059",
+        "\u30bb\u30c3\u30c8\u30a2\u30c3\u30d7\u304c\u5b8c\u4e86\u3057\u307e\u3057\u305f"
+      ],
+      "createdCategoryName": "\u51f8\u7ba1\u7406",
+      "createdTextChannelsInOrder": [
+        "\u30af\u30e9\u30d0\u30c8\u96d1\u8ac7",
+        "\u30dc\u30b91",
+        "\u30dc\u30b92",
+        "\u30dc\u30b93",
+        "\u30dc\u30b94",
+        "\u30dc\u30b95",
+        "\u9032\u884c\u628a\u63e1\u677f",
+        "\u6b8b\u51f8\u628a\u63e1\u677f",
+        "\u30b3\u30de\u30f3\u30c9\u5165\u529b\u677f",
+        "\u6301\u8d8a\u5909\u63db"
+      ],
+      "progressMessageReactions": [],
+      "progressMessageButtons": [
+        "\u2694\ufe0f \u672c\u6226\u51f8",
+        "\u2615 \u6301\u8d8a\u51f8",
+        "\u2611\ufe0f \u524a\u308a",
+        "\ud83c\udfc1 \u8a0e\u4f10",
+        "\u21a9\ufe0f \u623b\u308b"
+      ],
+      "remainAttackMessageReactions": [
+        "\ud83d\udc80"
+      ],
+      "boss1EmbedTitle": "[1\u5468\u76ee] 1\u30dc\u30b9 1,200\u4e07/1,200\u4e07 \u5408\u8a08 0\u4e07",
+      "remainSummary": "\u6b8b 0\u51f8 0\u6301"
+    },
+    "db": {
+      "clanCount": 1,
+      "bossStatusCount": 5,
+      "progressCount": 1,
+      "summaryCount": 1
+    }
+  },
+  "add/member-self": {
+    "ui": {
+      "messageSequence": [
+        "1\u540d\u8ffd\u52a0\u3057\u307e\u3059\u3002"
+      ],
+      "remainSummary": "\u6b8b 3\u51f8 0\u6301"
+    },
+    "db": {
+      "playerCount": 1,
+      "userIds": [
+        "333333333333333333"
+      ]
+    }
+  },
+  "attack_declare/basic": {
+    "ui": {
+      "messageSequence": [
+        "Alice\u306e\u51f8\u3092\u2694\ufe0f\u30671\u5468\u76ee1\u30dc\u30b9\u306b\u5ba3\u8a00\u3057\u307e\u3059"
+      ],
+      "progressTitle": "[1\u5468\u76ee] 1\u30dc\u30b9 1,200\u4e07/1,200\u4e07 \u5408\u8a08 0\u4e07",
+      "progressDescription": "\n\u2694\ufe0f 0\u4e07\n\u3000\u3000- Alice (0/3)"
+    },
+    "db": {
+      "attackRows": [
+        {
+          "lap": 1,
+          "boss_index": 0,
+          "attacked": 0,
+          "attack_type": "\u2694\ufe0f",
+          "carry_over": 0
+        }
+      ]
+    }
+  },
+  "message_damage/basic": {
+    "ui": {
+      "progressDescription": "\n\u2694\ufe0f 600\u4e07 60s\n\u3000\u3000- Alice (0/3)"
+    },
+    "db": {
+      "damage": 600,
+      "memo": "60s",
+      "attacked": 0
+    }
+  },
+  "attack_fin/basic": {
+    "ui": {
+      "messageSequence": [
+        "Alice\u306e\u51f8\u30921\u5468\u76ee1\u30dc\u30b9\u306b\u6d88\u5316\u3057\u307e\u3059"
+      ],
+      "progressDescription": "(\u2694\ufe0f\u6e08\u307f) 234,567\u4e07 Alice\n",
+      "remainSummary": "\u6b8b 1\u51f8 0\u6301"
+    },
+    "db": {
+      "attackRow": {
+        "attacked": 1,
+        "damage": 234567
+      },
+      "playerRow": {
+        "physics_attack": 2,
+        "magic_attack": 0
+      }
+    }
+  },
+  "defeat_boss/basic": {
+    "ui": {
+      "messageSequence": [
+        "Alice\u306e\u51f8\u30671\u30dc\u30b9\u3092\u8a0e\u4f10\u3057\u307e\u3059"
+      ],
+      "nextLapProgressCreated": 1,
+      "nextLapSummaryCreated": 0
+    },
+    "db": {
+      "bossStatusCount": 10,
+      "progressCount": 2,
+      "summaryCount": 1,
+      "carryOverCount": 1,
+      "beated": 1
+    }
+  },
+  "undo/basic": {
+    "ui": {
+      "messageSequence": [
+        "Alice\u306e1\u30dc\u30b9\u306b\u5bfe\u3059\u308b`\u30dc\u30b9\u3078\u306e\u51f8`\u3092\u5143\u306b\u623b\u3057\u307e\u3059\u3002"
+      ],
+      "progressDescription": "\n\u2694\ufe0f 234,567\u4e07 \u6301\u3061\u8d8a\u3057\u767a\u751f: 90\u79d2\n\u3000\u3000- Alice (1/3)",
+      "remainSummary": "\u6b8b 2\u51f8 0\u6301"
+    },
+    "db": {
+      "attackRow": {
+        "attacked": 0,
+        "damage": 234567
+      },
+      "playerRow": {
+        "physics_attack": 1,
+        "magic_attack": 0
+      }
+    }
+  },
+  "bossinfo_edit/basic": {
+    "ui": {
+      "messageSequence": [
+        "bossinfo \u7de8\u96c6\u30a6\u30a3\u30b6\u30fc\u30c9\u3092\u958b\u59cb\u3057\u307e\u3059\u3002\n\u3053\u306e\u8a2d\u5b9a\u306f guild \u5358\u4f4d\u3067\u4fdd\u5b58\u3055\u308c\u3001SQLite \u3092\u6b63\u672c\u3068\u3057\u3066\u7ba1\u7406\u3055\u308c\u307e\u3059\u3002\n\n\u5165\u529b\u30eb\u30fc\u30eb:\n- \u7a7a\u6b04\u3067\u9001\u4fe1\u3057\u305f\u5834\u5408\u306f\u3001\u65e2\u5b58\u5024\u3092\u7dad\u6301\u3057\u307e\u3059\uff08\u65b0\u3057\u304f\u5897\u3084\u3057\u305f\u30d5\u30a7\u30fc\u30ba\u306f\u7a7a\u6b04\u4e0d\u53ef\uff09\n- \u5883\u754c\u306e\u5165\u529b\u5f62\u5f0f: `\u958b\u59cb\u5468 \u7d42\u4e86\u5468`\uff08\u4f8b: `7 22` / \u6700\u7d42\u6bb5\u968e\u306f `23 -1`\uff09\n- HP \u306f\u6b63\u306e\u6574\u6570\u3067\u5165\u529b\u3057\u307e\u3059\n- \u73fe\u5728\u306e\u30d5\u30a7\u30fc\u30ba\u6570: 3\n\n\u307e\u305a\u30d5\u30a7\u30fc\u30ba\u6570\u3092\u78ba\u8a8d/\u5909\u66f4\u3057\u307e\u3059\u3002",
+        "\u5883\u754c\u5165\u529b 1/1\n\u5165\u529b\u5f62\u5f0f: `\u958b\u59cb\u5468 \u7d42\u4e86\u5468`\n\u8a18\u5165\u4f8b: `7 22` / \u6700\u7d42\u6bb5\u968e\u306f `23 -1`\n\u7a7a\u6b04: \u65e2\u5b58\u5024\u7dad\u6301\uff08\u65b0\u898f\u30d5\u30a7\u30fc\u30ba\u306f\u7a7a\u6b04\u4e0d\u53ef\uff09\n\u5bfe\u8c61: 1\u6bb5\u968e\u76ee\u301c1\u6bb5\u968e\u76ee",
+        "1\u30dc\u30b9 HP\u5165\u529b 1/1\n\u5165\u529b\u5f62\u5f0f: \u5404\u6bb5\u968e\u3054\u3068\u306b\u6b63\u306e\u6574\u6570\n\u8a18\u5165\u4f8b: `5600`\n\u7a7a\u6b04: \u65e2\u5b58\u5024\u7dad\u6301\uff08\u65b0\u898f\u30d5\u30a7\u30fc\u30ba\u306f\u7a7a\u6b04\u4e0d\u53ef\uff09\n\u5bfe\u8c61: 1\u6bb5\u968e\u76ee\u301c1\u6bb5\u968e\u76ee",
+        "\u5165\u529b\u304c\u5b8c\u4e86\u3057\u307e\u3057\u305f\u3002\u4fdd\u5b58\u524d\u30d7\u30ec\u30d3\u30e5\u30fc:\n(\u73fe\u5728\u306e\u53c2\u7167\u5143: default)\n\n\u30d5\u30a7\u30fc\u30ba\u6570: 1\n\u5883\u754c:\n  1\u6bb5\u968e: 1\u301c-1\nHP:\n  1\u30dc\u30b9: 5600\n  2\u30dc\u30b9: 1500\n  3\u30dc\u30b9: 2000\n  4\u30dc\u30b9: 2300\n  5\u30dc\u30b9: 3000\n\n\u4fdd\u5b58\u3059\u308b\u3068\u4ee5\u5f8c\u306b\u751f\u6210\u3055\u308c\u308b\u5468\u306e\u30dc\u30b9HP\u3078\u53cd\u6620\u3055\u308c\u307e\u3059\u3002\n\u9032\u884c\u4e2d\u306e\u5468\u306b\u5bfe\u3057\u3066\u306f\u8868\u793a/\u6574\u5408\u6027\u304c\u5909\u308f\u308b\u53ef\u80fd\u6027\u304c\u3042\u308b\u305f\u3081\u3001\u30ea\u30bb\u30c3\u30c8\u524d\u306e\u5909\u66f4\u3092\u63a8\u5968\u3057\u307e\u3059\u3002",
+        "bossinfo \u8a2d\u5b9a\u3092\u4fdd\u5b58\u3057\u307e\u3057\u305f (SQLite)\u3002\n\u30d5\u30a7\u30fc\u30ba\u6570: 1\n\u5883\u754c:\n  1\u6bb5\u968e: 1\u301c-1\nHP:\n  1\u30dc\u30b9: 5600\n  2\u30dc\u30b9: 1500\n  3\u30dc\u30b9: 2000\n  4\u30dc\u30b9: 2300\n  5\u30dc\u30b9: 3000\n\n\u5099\u8003: \u3053\u306e guild \u306e\u7ba1\u7406\u30ab\u30c6\u30b4\u30ea\u6570=1\u3002\n\u65b0\u3057\u304f\u751f\u6210\u3055\u308c\u308b BossStatusData \u304b\u3089\u65b0\u8a2d\u5b9a\u304c\u4f7f\u308f\u308c\u307e\u3059\u3002"
+      ],
+      "components": [
+        "modal",
+        "modal",
+        "modal",
+        "confirm"
+      ],
+      "modalTitles": [
+        "\u30dc\u30b9\u60c5\u5831\u66f8\u304d\u63db\u3048: \u30d5\u30a7\u30fc\u30ba\u6570",
+        "\u30dc\u30b9\u60c5\u5831\u66f8\u304d\u63db\u3048: \u5883\u754c (1-1\u6bb5\u968e)",
+        "\u30dc\u30b9\u60c5\u5831\u66f8\u304d\u63db\u3048: 1\u30dc\u30b9HP (1-1\u6bb5\u968e)"
+      ]
+    },
+    "db": {
+      "guildBossInfoCount": 1,
+      "boundaries": [
+        [
+          1,
+          -1
+        ]
+      ],
+      "hp": [
+        [
+          5600,
+          1500,
+          2000,
+          2300,
+          3000
+        ]
+      ]
+    }
+  }
+}

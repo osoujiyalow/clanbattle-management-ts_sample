@@ -17,13 +17,7 @@ interface ClanDataRow {
   boss4_channel_id: bigint;
   boss5_channel_id: bigint;
   remain_attack_channel_id: bigint;
-  reserve_channel_id: bigint;
   command_channel_id: bigint;
-  boss1_reserve_message_id: bigint | null;
-  boss2_reserve_message_id: bigint | null;
-  boss3_reserve_message_id: bigint | null;
-  boss4_reserve_message_id: bigint | null;
-  boss5_reserve_message_id: bigint | null;
   remain_attack_message_id: bigint | null;
   summary_channel_id: bigint;
   day: string;
@@ -41,23 +35,11 @@ const INSERT_CLAN_DATA_SQL = `insert into ClanData values (
   ?,
   ?,
   ?,
-  ?,
-  ?,
-  ?,
-  ?,
-  ?,
-  ?,
   ?
 )`;
 
 const UPDATE_CLAN_DATA_SQL = `update ClanData
 set
-  reserve_channel_id=?,
-  boss1_reserve_message_id=?,
-  boss2_reserve_message_id=?,
-  boss3_reserve_message_id=?,
-  boss4_reserve_message_id=?,
-  boss5_reserve_message_id=?,
   remain_attack_message_id=?,
   day=?
 where
@@ -79,16 +61,8 @@ function mapClanDataRowToDomain(row: ClanDataRow): ClanData {
       decodeSnowflake(row.boss5_channel_id),
     ],
     remainAttackChannelId: decodeSnowflake(row.remain_attack_channel_id),
-    reserveChannelId: decodeSnowflake(row.reserve_channel_id),
     commandChannelId: decodeSnowflake(row.command_channel_id),
     summaryChannelId: decodeSnowflake(row.summary_channel_id),
-    reserveMessageIds: [
-      decodeOptionalSnowflake(row.boss1_reserve_message_id),
-      decodeOptionalSnowflake(row.boss2_reserve_message_id),
-      decodeOptionalSnowflake(row.boss3_reserve_message_id),
-      decodeOptionalSnowflake(row.boss4_reserve_message_id),
-      decodeOptionalSnowflake(row.boss5_reserve_message_id),
-    ],
     remainAttackMessageId: decodeOptionalSnowflake(row.remain_attack_message_id),
     progressMessageIdsByLap: {},
     summaryMessageIdsByLap: {},
@@ -107,9 +81,7 @@ export class ClanRepository {
       encodeSnowflake(record.categoryId),
       ...record.bossChannelIds.map(encodeSnowflake),
       encodeSnowflake(record.remainAttackChannelId),
-      encodeSnowflake(record.reserveChannelId),
       encodeSnowflake(record.commandChannelId),
-      ...record.reserveMessageIds.map(encodeOptionalSnowflake),
       encodeOptionalSnowflake(record.remainAttackMessageId),
       encodeSnowflake(record.summaryChannelId),
       normalizeSqliteDate(record.date),
@@ -120,8 +92,6 @@ export class ClanRepository {
     const record = clanData.toRecord();
 
     this.database.prepare(UPDATE_CLAN_DATA_SQL).run(
-      encodeSnowflake(record.reserveChannelId),
-      ...record.reserveMessageIds.map(encodeOptionalSnowflake),
       encodeOptionalSnowflake(record.remainAttackMessageId),
       normalizeSqliteDate(record.date),
       encodeSnowflake(record.categoryId),

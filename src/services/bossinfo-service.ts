@@ -286,7 +286,7 @@ export class BossInfoService {
       kind: "modal",
       visibility: "ephemeral",
       timeoutSeconds: 600,
-      title: "bossinfo_edit: フェーズ数",
+      title: "ボス情報書き換え: フェーズ数",
       fields: [
         {
           label: "いくつ段階がありますか？（空欄=変更なし）",
@@ -342,7 +342,7 @@ export class BossInfoService {
       kind: "modal",
       visibility: "ephemeral",
       timeoutSeconds: 600,
-      title: `bossinfo_edit: 境界 (${startIndex + 1}-${endIndex + 1}段階)`,
+      title: `ボス情報書き換え: 境界 (${startIndex + 1}-${endIndex + 1}段階)`,
       fields,
     };
   }
@@ -417,7 +417,7 @@ export class BossInfoService {
       kind: "modal",
       visibility: "ephemeral",
       timeoutSeconds: 600,
-      title: `bossinfo_edit: ${session.hpBossIndex + 1}ボスHP (${startIndex + 1}-${endIndex + 1}段階)`,
+      title: `ボス情報書き換え: ${session.hpBossIndex + 1}ボスHP (${startIndex + 1}-${endIndex + 1}段階)`,
       fields,
     };
   }

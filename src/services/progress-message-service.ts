@@ -1,8 +1,8 @@
-import type { EmbedBuilder } from "discord.js";
+import type { ActionRowBuilder, EmbedBuilder, MessageActionRowComponentBuilder } from "discord.js";
 
-import { EMOJIS } from "../constants/emojis.js";
 import { USER_MESSAGES } from "../constants/messages.js";
 import type { ClanData } from "../domain/clan-data.js";
+import { createProgressActionComponents } from "../discord/progress-action-buttons.js";
 import { renderProgressEmbed } from "../renderers/progress-renderer.js";
 import { ProgressMessageIdRepository } from "../repositories/sqlite/boss-message-id-repository.js";
 import { BossStatusRepository } from "../repositories/sqlite/boss-status-repository.js";
@@ -20,15 +20,6 @@ const NOOP_LOGGER: Logger = {
   warn() {},
   error() {},
 };
-
-const PROGRESS_REACTIONS = [
-  EMOJIS.physics,
-  EMOJIS.magic,
-  EMOJIS.carryover,
-  EMOJIS.attack,
-  EMOJIS.lastAttack,
-  EMOJIS.reverse,
-] as const;
 
 function createBossSlots(): [string | null, string | null, string | null, string | null, string | null] {
   return [null, null, null, null, null];
@@ -63,6 +54,7 @@ export interface ProgressMessageResponseChannel {
 export interface ProgressMessageSendPayload {
   content?: string;
   embeds?: readonly EmbedBuilder[];
+  components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
 }
 
 export interface ProgressMessageEditableMessage {
@@ -277,11 +269,10 @@ export class ProgressMessageService {
 
     const progressMessage = await bossChannel.sendMessage({
       embeds: [progressEmbed],
+      components: createProgressActionComponents({
+        interactive: !(clanData.bossStatusByLap.get(lap)?.[bossIndex]?.beated ?? false),
+      }),
     });
-
-    for (const emoji of PROGRESS_REACTIONS) {
-      await progressMessage.addReaction(emoji);
-    }
 
     const hadProgressRow = clanData.progressMessageIdsByLap.has(lap);
     const progressMessageIds = [...(clanData.progressMessageIdsByLap.get(lap) ?? createBossSlots())];

@@ -11,8 +11,8 @@ import type { MemberService } from "../../services/member-service.js";
 import type { RuntimeStateService } from "../../services/runtime-state-service.js";
 import {
   DiscordGuildTextGateway,
+  resolveGuildDisplayNamesForUserIds,
   resolvePreferredUserDisplayName,
-  resolveCachedGuildDisplayNames,
 } from "../command-handlers/shared.js";
 
 type DiscordReaction = MessageReaction | PartialMessageReaction;
@@ -76,35 +76,34 @@ export function createReactionRemoveHandler(
       return;
     }
 
-    const displayNamesByUserId = new Map(
-      await (options.resolveDisplayNames?.(guild) ??
-        Promise.resolve(resolveCachedGuildDisplayNames(guild))),
-    );
-    displayNamesByUserId.set(user.id, getUserDisplayName(user, displayNamesByUserId));
-    const discordGateway =
-      options.createDiscordGateway?.(guild) ?? new DiscordGuildTextGateway(guild);
     await options.runtimeStateService.ensureDateUpToDate(parentId);
-    await options.memberService.ensureCurrentRemainAttackMessage({
-      categoryId: parentId,
-      member: {
-        id: user.id,
-        displayName: getUserDisplayName(user, displayNamesByUserId),
-      },
-      discordGateway,
-      displayNamesByUserId,
-    });
 
     const clanData = options.runtimeStateService.get(parentId);
     if (!clanData || message.id !== clanData.remainAttackMessageId) {
       return;
     }
 
+    const displayNamesByUserId = new Map(
+      await (options.resolveDisplayNames?.(guild) ??
+        resolveGuildDisplayNamesForUserIds(guild, clanData.playerDataMap.keys())),
+    );
+    displayNamesByUserId.set(user.id, getUserDisplayName(user, displayNamesByUserId));
+    const member = {
+      id: user.id,
+      displayName: getUserDisplayName(user, displayNamesByUserId),
+    };
+    const discordGateway =
+      options.createDiscordGateway?.(guild) ?? new DiscordGuildTextGateway(guild);
+    await options.memberService.ensureCurrentRemainAttackMessage({
+      categoryId: parentId,
+      member,
+      discordGateway,
+      displayNamesByUserId,
+    });
+
     await options.memberService.setTaskKill({
       categoryId: parentId,
-      member: {
-        id: user.id,
-        displayName: getUserDisplayName(user, displayNamesByUserId),
-      },
+      member,
       taskKill: false,
       discordGateway,
       displayNamesByUserId,

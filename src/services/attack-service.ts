@@ -1,16 +1,18 @@
-import type { EmbedBuilder } from "discord.js";
+import { randomUUID } from "node:crypto";
 
-import { EMOJIS } from "../constants/emojis.js";
+import type { ActionRowBuilder, EmbedBuilder, MessageActionRowComponentBuilder } from "discord.js";
+
 import { USER_MESSAGES } from "../constants/messages.js";
+import { AttackEntryKind, AttackEntryStatus } from "../domain/attack-entry.js";
+import type { AttackEntry } from "../domain/attack-entry.js";
 import { AttackStatus } from "../domain/attack-status.js";
-import { AttackType, parseAttackType } from "../domain/attack-type.js";
+import { AttackType, parseUserFacingAttackType } from "../domain/attack-type.js";
 import { type BossStatusData } from "../domain/boss-status-data.js";
 import { type ClanData } from "../domain/clan-data.js";
-import { OPERATION_TYPE_DESCRIPTION, OperationType } from "../domain/operation-type.js";
+import { OperationLog, OperationLogType } from "../domain/operation-log.js";
+import { OperationType } from "../domain/operation-type.js";
 import { CarryOver, type LogData, type PlayerData } from "../domain/player-data.js";
-import type { ReserveData } from "../domain/reserve-data.js";
-import { parseDamageMessage } from "../domain/util/damage-parser.js";
-import { renderProgressEmbed } from "../renderers/progress-renderer.js";
+import { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import { AttackStatusRepository } from "../repositories/sqlite/attack-status-repository.js";
 import { BossStatusRepository } from "../repositories/sqlite/boss-status-repository.js";
 import {
@@ -20,12 +22,72 @@ import {
 import { CarryOverRepository } from "../repositories/sqlite/carry-over-repository.js";
 import { ClanRepository } from "../repositories/sqlite/clan-repository.js";
 import { runInTransaction, type SqliteDatabase } from "../repositories/sqlite/db.js";
+import { OperationLogRepository } from "../repositories/sqlite/operation-log-repository.js";
 import { PlayerRepository } from "../repositories/sqlite/player-repository.js";
-import { ReserveRepository } from "../repositories/sqlite/reserve-repository.js";
+import { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
 import type { ClanBattleDayGuardResult } from "../shared/date-guard.js";
 import type { Logger } from "../shared/logger.js";
 import { now, type Clock, systemClock } from "../shared/time.js";
-import { buildRemainAttackEmbed, sendRemainAttackMessage } from "./remain-attack-message.js";
+import {
+  ALREADY_DEFEATED_MESSAGE,
+  CARRYOVER_DECLARE_BLOCKED_MESSAGE,
+  CORRECT_ATTACK_KIND_CANCELLED_MESSAGE,
+  CORRECT_ATTACK_KIND_INVALID_MESSAGE,
+  CORRECT_ATTACK_KIND_NOTHING_MESSAGE,
+  DECLARE_RESOURCE_EXHAUSTED_MESSAGE,
+  UNDO_BLOCKED_BY_LATER_OPERATIONS_MESSAGE,
+  UNDO_DEFEAT_BLOCKED_BY_NEXT_LAP_MESSAGE,
+  UNDO_NOTHING_MESSAGE,
+  compareCarryOversOldestFirst,
+  createBossSlots,
+  formatAttackFinishMessage,
+  formatCarryOverMissingMessage,
+  formatDeclareMessage,
+  formatDefeatBossMessage,
+  formatNotManagedMessage,
+  formatUndoMemberNotManagedMessage,
+  formatUndoMessage,
+  hasAnyAttackPlayers,
+  sendAttackResponse,
+} from "./attack-service-support.js";
+import {
+  findCorrectableAttackEntries as findCorrectableAttackEntriesState,
+  findMessageDamageTarget as findMessageDamageTargetState,
+  prepareAttackKindCorrection,
+} from "./attack-service-correction.js";
+import {
+  findUndoLogIndexForBoss as findUndoLogIndexForBossState,
+  findUndoLogIndexForProgressContext as findUndoLogIndexForProgressContextState,
+  findUndoOperationTargetForBoss as findUndoOperationTargetForBossState,
+  findUndoOperationTargetForProgressContext as findUndoOperationTargetForProgressContextState,
+  hasProjectedUndoState,
+  isUndoBlockedByLaterOperations as isUndoBlockedByLaterOperationsState,
+  isUndoBlockedByLaterPlayerOperations as isUndoBlockedByLaterPlayerOperationsState,
+  resolveUndoBossIndex as resolveUndoBossIndexState,
+  toLegacyOperationType as toLegacyOperationTypeState,
+  toOperationLogType as toOperationLogTypeState,
+  type UndoOperationTarget,
+} from "./attack-service-undo.js";
+import {
+  createAttackEntryFromAttackStatus as createAttackEntryFromAttackStatusRecord,
+  findExistingAttackEntry as findExistingAttackEntryRecord,
+  normalizeAttackEntryDamage as normalizeAttackEntryDamageValue,
+  normalizeAttackEntryMemo as normalizeAttackEntryMemoValue,
+  resolveDeclaredAttack as resolveDeclaredAttackState,
+  type ValidatedResolutionRequest,
+  upsertAttackEntrySnapshot as upsertAttackEntrySnapshotRecord,
+} from "./attack-service-resolution.js";
+import {
+  resolveAttackBossIndex,
+  type ValidatedAttackRequest,
+  validateAttackRequest as validateAttackRequestState,
+} from "./attack-service-validation.js";
+import {
+  AttackDeferredMessageSyncQueue,
+  type DeferredNonProgressSyncJob,
+} from "./attack-deferred-message-sync-queue.js";
+import { DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS } from "./discord-message-retry.js";
+import { AttackServiceMessageCoordinator } from "./attack-service-message-coordinator.js";
 import type { RuntimeStateService } from "./runtime-state-service.js";
 
 const NOOP_LOGGER: Logger = {
@@ -35,72 +97,6 @@ const NOOP_LOGGER: Logger = {
   error() {},
 };
 
-const CARRYOVER_DECLARE_BLOCKED_MESSAGE =
-  "持ち越しを所持していません。凸宣言をキャンセルします。";
-const ATTACK_NOT_DECLARED_MESSAGE = "凸宣言がされていません。処理を中断します。";
-const ALREADY_DEFEATED_MESSAGE = "既に討伐済みのボスです";
-const UNDO_NOTHING_MESSAGE = "元に戻す内容がありませんでした";
-const UNDO_DEFEAT_BLOCKED_BY_NEXT_LAP_MESSAGE = "次周に既に操作があるため自動巻き戻しできません";
-const DEFAULT_REDRAW_RETRY_COUNT = 3;
-const DEFAULT_REDRAW_RETRY_DELAY_MS = 10;
-const PROGRESS_REACTIONS = [
-  EMOJIS.physics,
-  EMOJIS.magic,
-  EMOJIS.carryover,
-  EMOJIS.attack,
-  EMOJIS.lastAttack,
-  EMOJIS.reverse,
-] as const;
-
-function createBossSlots(): [string | null, string | null, string | null, string | null, string | null] {
-  return [null, null, null, null, null];
-}
-
-function mentionUser(userId: string): string {
-  return `<@${userId}>`;
-}
-
-function formatNotManagedMessage(displayName: string): string {
-  return `${displayName}は凸管理対象ではありません。`;
-}
-
-function formatDeclareMessage(
-  displayName: string,
-  attackTypeText: string,
-  lap: number,
-  bossNumber: number,
-): string {
-  return `${displayName}の凸を${attackTypeText}で${lap}周目${bossNumber}ボスに宣言します`;
-}
-
-function formatAttackFinishMessage(displayName: string, lap: number, bossNumber: number): string {
-  return `${displayName}の凸を${lap}周目${bossNumber}ボスに消化します`;
-}
-
-function formatDefeatBossMessage(displayName: string, bossNumber: number): string {
-  return `${displayName}の凸で${bossNumber}ボスを討伐します`;
-}
-
-function formatUndoMemberNotManagedMessage(displayName: string): string {
-  return `${displayName}さんは凸管理のメンバーに指定されていません。`;
-}
-
-function formatUndoMessage(
-  displayName: string,
-  bossNumber: number,
-  operationType: OperationType,
-): string {
-  return `${displayName}の${bossNumber}ボスに対する\`${OPERATION_TYPE_DESCRIPTION[operationType]}\`を元に戻します。`;
-}
-
-function formatCarryOverMissingMessage(userId: string): string {
-  return `${mentionUser(userId)} 持ち越しを所持していません。キャンセルします。`;
-}
-
-function formatCarryOverSelectionPrompt(userId: string): string {
-  return `${mentionUser(userId)} 持ち越しが二つ以上発生しています。以下から使用した持ち越しを選択してください`;
-}
-
 export interface AttackDeclareMember {
   id: string;
   displayName: string;
@@ -108,11 +104,15 @@ export interface AttackDeclareMember {
 
 export interface AttackDeclareResponseChannel {
   send(payload: { content?: string }): Promise<void>;
+  sendTransient?(payload: { content?: string }, deleteAfterMs?: number): Promise<void>;
 }
 
 export interface AttackEditableMessage {
   readonly id: string;
-  edit(payload: { embeds?: readonly EmbedBuilder[] }): Promise<void>;
+  edit(payload: {
+    embeds?: readonly EmbedBuilder[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
+  }): Promise<void>;
   delete?(): Promise<void>;
 }
 
@@ -123,6 +123,7 @@ export interface AttackCreatedMessage extends AttackEditableMessage {
 export interface AttackSendPayload {
   content?: string;
   embeds?: readonly EmbedBuilder[];
+  components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
 }
 
 export interface AttackTextChannel {
@@ -139,6 +140,11 @@ interface AttackRenderContext {
   member: AttackDeclareMember;
   discordGateway: AttackDiscordGateway;
   displayNamesByUserId?: ReadonlyMap<string, string>;
+  resolveDisplayNamesByUserIds?: (
+    userIds: Iterable<string>,
+  ) => Promise<ReadonlyMap<string, string>>;
+  currentProgressMessage?: AttackEditableMessage;
+  deferNonProgressMessageUpdates?: boolean;
 }
 
 interface AttackServiceBaseRequest extends AttackRenderContext {
@@ -174,7 +180,30 @@ export interface DefeatBossRequest extends AttackServiceBaseRequest {
 
 export interface UndoAttackRequest extends AttackRenderContext {
   categoryId: string;
+  channelId?: string;
+  lap?: number;
+  bossNumber?: number;
+  suppressSuccessResponse?: boolean;
   responseChannel: AttackDeclareResponseChannel;
+}
+
+export interface AttackEntrySelectionInput {
+  member: AttackDeclareMember;
+  attackEntries: readonly AttackEntry[];
+  responseChannel: AttackDeclareResponseChannel;
+}
+
+export type AttackEntrySelector = (
+  input: AttackEntrySelectionInput,
+) => Promise<string | null>;
+
+export interface CorrectAttackKindRequest extends AttackRenderContext {
+  categoryId: string;
+  channelId: string;
+  lap: number;
+  bossNumber: number;
+  responseChannel: AttackDeclareResponseChannel;
+  selectAttackEntry?: AttackEntrySelector;
 }
 
 export interface MessageDamageRequest extends AttackRenderContext {
@@ -187,11 +216,13 @@ export interface AttackServiceOptions {
   database: SqliteDatabase;
   runtimeStateService: RuntimeStateService;
   clanRepository?: ClanRepository;
+  attackEntryRepository?: AttackEntryRepository;
   attackStatusRepository?: AttackStatusRepository;
   bossStatusRepository?: BossStatusRepository;
+  operationLogRepository?: OperationLogRepository;
   playerRepository?: PlayerRepository;
-  reserveRepository?: ReserveRepository;
   carryOverRepository?: CarryOverRepository;
+  resourceAdjustmentRepository?: ResourceAdjustmentRepository;
   progressMessageIdRepository?: ProgressMessageIdRepository;
   summaryMessageIdRepository?: SummaryMessageIdRepository;
   clock?: Clock;
@@ -199,90 +230,63 @@ export interface AttackServiceOptions {
   redrawRetryDelayMs?: number;
 }
 
-function cloneDisplayNamesMap(
-  displayNamesByUserId: ReadonlyMap<string, string> | undefined,
-): Map<string, string> {
-  return new Map(displayNamesByUserId ?? []);
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-function isMessageMissingError(error: unknown): boolean {
-  if (typeof error === "object" && error !== null && "code" in error && error.code === 10008) {
-    return true;
-  }
-
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  return error.message.includes("Unknown message id") || error.message.includes("Unknown Message");
-}
-
-interface ValidatedAttackRequest {
-  clanData: ClanData;
-  playerData: PlayerData;
-  lap: number;
-  bossIndex: number;
-}
-
-interface ValidatedResolutionRequest extends ValidatedAttackRequest {
-  bossStatusData: BossStatusData;
-  attackStatus: AttackStatus;
-}
-
-interface ReserveCleanupResult {
-  readonly touchedBossIndexes: ReadonlySet<number>;
-  readonly removedByBossIndex: ReadonlyMap<number, readonly ReserveData[]>;
-}
-
-interface MessageUpdateResult {
-  updated: boolean;
-  missing: boolean;
-}
-
-function hasAnyAttackPlayers(bossStatusData: BossStatusData | undefined): boolean {
-  return (bossStatusData?.attackPlayers.length ?? 0) > 0;
-}
-
-function hasAnyMessageIds(messageIds: readonly (string | null)[] | undefined): boolean {
-  return messageIds?.some((messageId) => messageId !== null) ?? false;
-}
-
 export class AttackService {
-  private readonly clanRepository: ClanRepository;
+  private readonly attackEntryRepository: AttackEntryRepository;
   private readonly attackStatusRepository: AttackStatusRepository;
   private readonly bossStatusRepository: BossStatusRepository;
+  private readonly operationLogRepository: OperationLogRepository;
   private readonly playerRepository: PlayerRepository;
-  private readonly reserveRepository: ReserveRepository;
   private readonly carryOverRepository: CarryOverRepository;
+  private readonly resourceAdjustmentRepository: ResourceAdjustmentRepository;
   private readonly progressMessageIdRepository: ProgressMessageIdRepository;
-  private readonly summaryMessageIdRepository: SummaryMessageIdRepository;
   private readonly clock: Clock;
   private readonly logger: Logger;
-  private readonly redrawRetryDelayMs: number;
+  private readonly messageCoordinator: AttackServiceMessageCoordinator;
+  private readonly deferredNonProgressMessageSyncQueue: AttackDeferredMessageSyncQueue<AttackRenderContext>;
 
   constructor(private readonly options: AttackServiceOptions) {
-    this.clanRepository = options.clanRepository ?? new ClanRepository(options.database);
+    const clanRepository = options.clanRepository ?? new ClanRepository(options.database);
+    this.attackEntryRepository =
+      options.attackEntryRepository ?? new AttackEntryRepository(options.database);
     this.attackStatusRepository =
       options.attackStatusRepository ?? new AttackStatusRepository(options.database);
     this.bossStatusRepository =
       options.bossStatusRepository ?? new BossStatusRepository(options.database);
+    this.operationLogRepository =
+      options.operationLogRepository ?? new OperationLogRepository(options.database);
     this.playerRepository = options.playerRepository ?? new PlayerRepository(options.database);
-    this.reserveRepository = options.reserveRepository ?? new ReserveRepository(options.database);
     this.carryOverRepository =
       options.carryOverRepository ?? new CarryOverRepository(options.database);
+    this.resourceAdjustmentRepository =
+      options.resourceAdjustmentRepository ?? new ResourceAdjustmentRepository(options.database);
     this.progressMessageIdRepository =
       options.progressMessageIdRepository ?? new ProgressMessageIdRepository(options.database);
-    this.summaryMessageIdRepository =
+    const summaryMessageIdRepository =
       options.summaryMessageIdRepository ?? new SummaryMessageIdRepository(options.database);
     this.clock = options.clock ?? systemClock;
     this.logger = options.logger ?? NOOP_LOGGER;
-    this.redrawRetryDelayMs = options.redrawRetryDelayMs ?? DEFAULT_REDRAW_RETRY_DELAY_MS;
+    const redrawRetryDelayMs =
+      options.redrawRetryDelayMs ?? DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS;
+    this.messageCoordinator = new AttackServiceMessageCoordinator({
+      database: options.database,
+      clanRepository,
+      progressMessageIdRepository: this.progressMessageIdRepository,
+      summaryMessageIdRepository,
+      clock: this.clock,
+      logger: this.logger,
+      redrawRetryDelayMs,
+    });
+    this.deferredNonProgressMessageSyncQueue = new AttackDeferredMessageSyncQueue({
+      logger: this.logger,
+      run: async (categoryId, job) => {
+        const clanData = this.options.runtimeStateService.get(categoryId);
+        if (!clanData) {
+          return;
+        }
+
+        await this.runNonProgressMessageUpdates(clanData, job);
+      },
+    });
   }
 
   async declare(request: AttackDeclareRequest): Promise<AttackStatus | null> {
@@ -292,6 +296,7 @@ export class AttackService {
         : null;
       const currentClanData = this.options.runtimeStateService.get(request.categoryId);
       await this.ensureCurrentRemainAttackMessage(currentClanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(currentClanData, dayGuardResult, request);
 
       const validation = await this.validateAttackRequest(request);
       if (!validation) {
@@ -300,22 +305,51 @@ export class AttackService {
 
       const { clanData, playerData, lap, bossIndex } = validation;
 
-      const parsedAttackType = parseAttackType(request.attackType);
+      const parsedAttackType = parseUserFacingAttackType(request.attackType);
       if (!parsedAttackType) {
-        await request.responseChannel.send({
+        await sendAttackResponse(request.responseChannel, {
           content: USER_MESSAGES.errors.invalidAttackType,
         });
         return null;
       }
 
-      if (parsedAttackType === AttackType.CARRYOVER && playerData.carryOverList.length === 0) {
-        await request.responseChannel.send({
-          content: CARRYOVER_DECLARE_BLOCKED_MESSAGE,
-        });
+      const playerResourceState = this.options.runtimeStateService.getPlayerResourceState(
+        clanData.categoryId,
+        playerData.userId,
+        clanData.date,
+      );
+      const occupiedBattleCount =
+        (playerResourceState?.battleReservedCount ?? 0) +
+        (playerResourceState?.battleConsumedCount ?? playerData.battleAttackCount);
+      const carryAvailableCount =
+        playerResourceState?.carryAvailableCount ?? playerData.carryOverList.length;
+
+      if (parsedAttackType === AttackType.BATTLE && occupiedBattleCount >= 3) {
+        await sendAttackResponse(
+          request.responseChannel,
+          {
+            content: DECLARE_RESOURCE_EXHAUSTED_MESSAGE,
+          },
+          { transient: true },
+        );
         return null;
       }
 
-      await request.responseChannel.send({
+      if (parsedAttackType === AttackType.CARRYOVER && carryAvailableCount <= 0) {
+        await sendAttackResponse(
+          request.responseChannel,
+          {
+            content:
+              playerData.carryOverList.length === 0
+                ? CARRYOVER_DECLARE_BLOCKED_MESSAGE
+                : DECLARE_RESOURCE_EXHAUSTED_MESSAGE,
+          },
+          { transient: true },
+        );
+        return null;
+      }
+
+      await sendAttackResponse(request.responseChannel, {
         content: formatDeclareMessage(
           request.member.displayName,
           parsedAttackType,
@@ -336,6 +370,7 @@ export class AttackService {
         carryOver: parsedAttackType === AttackType.CARRYOVER,
         created: now(this.clock),
       });
+      const transitionAt = attackStatus.created;
       clanData.bossStatusByLap.get(lap)![bossIndex]!.attackPlayers.push(attackStatus);
       playerData.log.push({
         operationType: OperationType.ATTACK_DECLAR,
@@ -349,9 +384,32 @@ export class AttackService {
         }
 
         this.attackStatusRepository.insert(clanData.categoryId, lap, bossIndex, attackStatus);
+        const attackEntry = this.upsertAttackEntrySnapshot(
+          clanData.categoryId,
+          clanData.date,
+          lap,
+          bossIndex,
+          attackStatus,
+        );
+        this.insertOperationLog({
+          categoryId: clanData.categoryId,
+          userId: playerData.userId,
+          dayKey: clanData.date,
+          lap,
+          bossIndex,
+          targetAttackEntryId: attackEntry.attackEntryId,
+          operationType: OperationLogType.DECLARE,
+          afterKind: attackEntry.kind,
+          afterStatus: AttackEntryStatus.DECLARED,
+          occurredAt: transitionAt,
+        });
+        this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
       });
 
       await this.updateProgressMessages(clanData, lap, bossIndex, request);
+      await this.syncNonProgressMessages(clanData, request, {
+        updateSummary: true,
+      });
 
       return attackStatus;
     });
@@ -364,6 +422,7 @@ export class AttackService {
         : null;
       const currentClanData = this.options.runtimeStateService.get(request.categoryId);
       await this.ensureCurrentRemainAttackMessage(currentClanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(currentClanData, dayGuardResult, request);
 
       const validation = await this.validateAttackRequest(request);
       if (!validation) {
@@ -396,7 +455,6 @@ export class AttackService {
 
       if (resolution.attackStatus.attackType === AttackType.CARRYOVER) {
         const carryOverConsumed = await this.consumeCarryOver(
-          resolution.clanData,
           resolution.attackStatus,
           request,
         );
@@ -408,12 +466,7 @@ export class AttackService {
       }
 
       resolution.attackStatus.attacked = true;
-
-      const reserveCleanup = this.cleanupReserveByAttack(
-        resolution.clanData,
-        resolution.attackStatus,
-        resolution.bossIndex,
-      );
+      const transitionAt = now(this.clock);
 
       runInTransaction(this.options.database, () => {
         this.attackStatusRepository.update(
@@ -428,16 +481,52 @@ export class AttackService {
           resolution.playerData.userId,
           resolution.playerData.carryOverList,
         );
-
-        for (const [bossIndex, reserveList] of reserveCleanup.removedByBossIndex.entries()) {
-          for (const reserveData of reserveList) {
-            this.reserveRepository.delete(resolution.clanData.categoryId, bossIndex, reserveData);
-          }
-        }
+        const attackEntry = this.upsertAttackEntrySnapshot(
+          resolution.clanData.categoryId,
+          resolution.clanData.date,
+          resolution.lap,
+          resolution.bossIndex,
+          resolution.attackStatus,
+        );
+        const beforeStatus =
+          this.findExistingAttackEntry(
+            resolution.clanData.categoryId,
+            resolution.playerData.userId,
+            resolution.lap,
+            resolution.bossIndex,
+            resolution.attackStatus,
+          )?.status ?? AttackEntryStatus.DECLARED;
+        attackEntry.status = AttackEntryStatus.FINISHED;
+        attackEntry.resolvedAt = transitionAt;
+        attackEntry.damage = this.normalizeAttackEntryDamage(resolution.attackStatus.damage);
+        attackEntry.memo = this.normalizeAttackEntryMemo(resolution.attackStatus.memo);
+        this.attackEntryRepository.update(attackEntry);
+        this.insertOperationLog({
+          categoryId: resolution.clanData.categoryId,
+          userId: resolution.playerData.userId,
+          dayKey: resolution.clanData.date,
+          lap: resolution.lap,
+          bossIndex: resolution.bossIndex,
+          targetAttackEntryId: attackEntry.attackEntryId,
+          operationType: OperationLogType.FINISH,
+          beforeKind: attackEntry.kind,
+          afterKind: attackEntry.kind,
+          beforeStatus,
+          afterStatus: AttackEntryStatus.FINISHED,
+          occurredAt: transitionAt,
+        });
+        this.syncProjectedStateForCategory(
+          resolution.clanData.categoryId,
+          resolution.clanData.date,
+          transitionAt,
+        );
       });
 
       await this.updateProgressMessages(resolution.clanData, resolution.lap, resolution.bossIndex, request);
-      await this.updateRemainAttackMessage(resolution.clanData, request);
+      await this.syncNonProgressMessages(resolution.clanData, request, {
+        updateSummary: true,
+        updateRemainAttack: true,
+      });
       return resolution.attackStatus;
     });
   }
@@ -449,6 +538,7 @@ export class AttackService {
         : null;
       const currentClanData = this.options.runtimeStateService.get(request.categoryId);
       await this.ensureCurrentRemainAttackMessage(currentClanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(currentClanData, dayGuardResult, request);
 
       const validation = await this.validateAttackRequest(request);
       if (!validation) {
@@ -481,7 +571,6 @@ export class AttackService {
 
       if (resolution.attackStatus.attackType === AttackType.CARRYOVER) {
         const carryOverConsumed = await this.consumeCarryOver(
-          resolution.clanData,
           resolution.attackStatus,
           request,
         );
@@ -504,12 +593,7 @@ export class AttackService {
 
       resolution.attackStatus.attacked = true;
       resolution.bossStatusData.beated = true;
-
-      const reserveCleanup = this.cleanupReserveByAttack(
-        resolution.clanData,
-        resolution.attackStatus,
-        resolution.bossIndex,
-      );
+      const transitionAt = now(this.clock);
 
       const nextLap = resolution.lap + 1;
       const initializedNextLapProgressRow = this.ensureProgressRow(resolution.clanData, nextLap);
@@ -529,6 +613,48 @@ export class AttackService {
           resolution.playerData.userId,
           resolution.playerData.carryOverList,
         );
+        const attackEntry = this.upsertAttackEntrySnapshot(
+          resolution.clanData.categoryId,
+          resolution.clanData.date,
+          resolution.lap,
+          resolution.bossIndex,
+          resolution.attackStatus,
+        );
+        const beforeStatus =
+          this.findExistingAttackEntry(
+            resolution.clanData.categoryId,
+            resolution.playerData.userId,
+            resolution.lap,
+            resolution.bossIndex,
+            resolution.attackStatus,
+          )?.status ?? AttackEntryStatus.DECLARED;
+        attackEntry.status = AttackEntryStatus.DEFEATED;
+        attackEntry.resolvedAt = transitionAt;
+        attackEntry.damage = this.normalizeAttackEntryDamage(resolution.attackStatus.damage);
+        attackEntry.memo = this.normalizeAttackEntryMemo(resolution.attackStatus.memo);
+        this.attackEntryRepository.update(attackEntry);
+        this.insertOperationLog({
+          categoryId: resolution.clanData.categoryId,
+          userId: resolution.playerData.userId,
+          dayKey: resolution.clanData.date,
+          lap: resolution.lap,
+          bossIndex: resolution.bossIndex,
+          targetAttackEntryId: attackEntry.attackEntryId,
+          operationType: OperationLogType.DEFEAT,
+          beforeKind: attackEntry.kind,
+          afterKind: attackEntry.kind,
+          beforeStatus,
+          afterStatus: AttackEntryStatus.DEFEATED,
+          occurredAt: transitionAt,
+        });
+        this.expirePendingAttackEntriesAfterDefeat(
+          resolution.clanData,
+          resolution.bossStatusData,
+          resolution.lap,
+          resolution.bossIndex,
+          resolution.attackStatus,
+          transitionAt,
+        );
 
         if (initializedNextLapProgressRow) {
           this.progressMessageIdRepository.insert(
@@ -544,17 +670,19 @@ export class AttackService {
             resolution.clanData.bossStatusByLap.get(nextLap)!,
           );
         }
-
-        for (const [bossIndex, reserveList] of reserveCleanup.removedByBossIndex.entries()) {
-          for (const reserveData of reserveList) {
-            this.reserveRepository.delete(resolution.clanData.categoryId, bossIndex, reserveData);
-          }
-        }
+        this.syncProjectedStateForCategory(
+          resolution.clanData.categoryId,
+          resolution.clanData.date,
+          transitionAt,
+        );
       });
 
       await this.updateProgressMessages(resolution.clanData, resolution.lap, resolution.bossIndex, request);
       await this.ensureProgressMessage(resolution.clanData, nextLap, resolution.bossIndex, request);
-      await this.updateRemainAttackMessage(resolution.clanData, request);
+      await this.syncNonProgressMessages(resolution.clanData, request, {
+        updateSummary: true,
+        updateRemainAttack: true,
+      });
       return resolution.attackStatus;
     });
   }
@@ -567,6 +695,7 @@ export class AttackService {
 
       const clanData = this.options.runtimeStateService.get(request.categoryId);
       await this.ensureCurrentRemainAttackMessage(clanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(clanData, dayGuardResult, request);
       if (!clanData) {
         await request.responseChannel.send({
           content: USER_MESSAGES.errors.categoryRequired,
@@ -582,9 +711,116 @@ export class AttackService {
         return false;
       }
 
-      const logData = playerData.log.at(-1);
+      const bossIndex = await resolveUndoBossIndexState(clanData, request);
+      if (bossIndex === null) {
+        return false;
+      }
+
+      const operationLogs = this.options.runtimeStateService.getOperationLogs(clanData.categoryId);
+      const operationTarget =
+        request.lap !== undefined
+          ? findUndoOperationTargetForProgressContextState({
+              operationLogs,
+              findAttackEntryById: (attackEntryId) =>
+                this.attackEntryRepository.findById(attackEntryId),
+              userId: playerData.userId,
+              dayKey: clanData.date,
+              bossIndex,
+              lap: request.lap,
+            })
+          : findUndoOperationTargetForBossState({
+              operationLogs,
+              findAttackEntryById: (attackEntryId) =>
+                this.attackEntryRepository.findById(attackEntryId),
+              userId: playerData.userId,
+              dayKey: clanData.date,
+              bossIndex,
+            });
+      if (operationTarget) {
+        if (
+          isUndoBlockedByLaterOperationsState({
+            targetOperationLog: operationTarget.operationLog,
+            targetAttackEntry: operationTarget.attackEntry,
+            attackEntries: this.findAttackEntriesForUserDay(
+              clanData.categoryId,
+              playerData.userId,
+              clanData.date,
+            ),
+            resourceAdjustments: this.findResourceAdjustmentsForUserDay(
+              clanData.categoryId,
+              playerData.userId,
+              clanData.date,
+            ),
+            operationLogs,
+          })
+        ) {
+          await sendAttackResponse(
+            request.responseChannel,
+            {
+              content: UNDO_BLOCKED_BY_LATER_OPERATIONS_MESSAGE,
+            },
+            { transient: true },
+          );
+          return false;
+        }
+
+        if (
+          operationTarget.operationLog.operationType === OperationLogType.DEFEAT &&
+          this.isDefeatUndoBlockedByNextLap(clanData, operationTarget.operationLog)
+        ) {
+          await sendAttackResponse(
+            request.responseChannel,
+            {
+              content: UNDO_DEFEAT_BLOCKED_BY_NEXT_LAP_MESSAGE,
+            },
+            { transient: true },
+          );
+          return false;
+        }
+
+        if (!request.suppressSuccessResponse) {
+          await sendAttackResponse(request.responseChannel, {
+            content: formatUndoMessage(
+              request.member.displayName,
+              operationTarget.attackEntry.bossIndex + 1,
+              toLegacyOperationTypeState(operationTarget.operationLog.operationType),
+            ),
+          });
+        }
+
+        if (operationTarget.operationLog.operationType === OperationLogType.DECLARE) {
+          return this.undoAttackDeclareFromOperation(clanData, operationTarget, request);
+        }
+
+        return this.undoResolvedAttackFromOperation(clanData, operationTarget, request);
+      }
+
+      if (
+        hasProjectedUndoState({
+          attackEntries: this.options.runtimeStateService.getAttackEntries(clanData.categoryId),
+          operationLogs,
+        })
+      ) {
+        await sendAttackResponse(request.responseChannel, {
+          content: UNDO_NOTHING_MESSAGE,
+        });
+        return false;
+      }
+
+      const logIndex =
+        request.lap !== undefined
+          ? findUndoLogIndexForProgressContextState(playerData.log, bossIndex, request.lap)
+          : findUndoLogIndexForBossState(playerData.log, bossIndex);
+      if (logIndex === undefined) {
+        await sendAttackResponse(request.responseChannel, {
+          content: UNDO_NOTHING_MESSAGE,
+        });
+        return false;
+      }
+
+      const logData = playerData.log[logIndex];
       if (!logData) {
-        await request.responseChannel.send({
+        await sendAttackResponse(request.responseChannel, {
           content: UNDO_NOTHING_MESSAGE,
         });
         return false;
@@ -595,35 +831,223 @@ export class AttackService {
         return true;
       }
 
+      if (isUndoBlockedByLaterPlayerOperationsState(playerData.log, logIndex, logData)) {
+        await sendAttackResponse(
+          request.responseChannel,
+          {
+            content: UNDO_BLOCKED_BY_LATER_OPERATIONS_MESSAGE,
+          },
+          { transient: true },
+        );
+        return false;
+      }
+
       if (
         logData.operationType === OperationType.LAST_ATTACK &&
         this.isDefeatUndoBlockedByNextLap(clanData, logData)
       ) {
-        await request.responseChannel.send({
-          content: UNDO_DEFEAT_BLOCKED_BY_NEXT_LAP_MESSAGE,
-        });
+        await sendAttackResponse(
+          request.responseChannel,
+          {
+            content: UNDO_DEFEAT_BLOCKED_BY_NEXT_LAP_MESSAGE,
+          },
+          { transient: true },
+        );
         return false;
       }
 
-      await request.responseChannel.send({
-        content: formatUndoMessage(
-          request.member.displayName,
-          logData.bossIndex + 1,
-          logData.operationType,
-        ),
-      });
+      if (!request.suppressSuccessResponse) {
+        await sendAttackResponse(request.responseChannel, {
+          content: formatUndoMessage(
+            request.member.displayName,
+            logData.bossIndex + 1,
+            logData.operationType,
+          ),
+        });
+      }
 
       if (logData.operationType === OperationType.ATTACK_DECLAR) {
-        return this.undoAttackDeclare(clanData, playerData, logData, bossStatusData, request);
+        return this.undoAttackDeclare(
+          clanData,
+          playerData,
+          logData,
+          logIndex,
+          bossStatusData,
+          request,
+        );
       }
 
       if (
         logData.operationType === OperationType.ATTACK ||
         logData.operationType === OperationType.LAST_ATTACK
       ) {
-        return this.undoResolvedAttack(clanData, playerData, logData, bossStatusData, request);
+        return this.undoResolvedAttack(
+          clanData,
+          playerData,
+          logData,
+          logIndex,
+          bossStatusData,
+          request,
+        );
       }
 
+      return true;
+    });
+  }
+
+  async correctAttackKind(request: CorrectAttackKindRequest): Promise<boolean> {
+    return this.options.runtimeStateService.withCategoryLock(request.categoryId, async () => {
+      const dayGuardResult = this.options.runtimeStateService.get(request.categoryId)
+        ? this.options.runtimeStateService.ensureDateUpToDateLocked(request.categoryId, this.clock)
+        : null;
+
+      const clanData = this.options.runtimeStateService.get(request.categoryId);
+      await this.ensureCurrentRemainAttackMessage(clanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(clanData, dayGuardResult, request);
+      if (!clanData) {
+        await request.responseChannel.send({
+          content: USER_MESSAGES.errors.categoryRequired,
+        });
+        return false;
+      }
+
+      const playerData = clanData.getPlayerData(request.member.id);
+      if (!playerData) {
+        await request.responseChannel.send({
+          content: formatNotManagedMessage(request.member.displayName),
+        });
+        return false;
+      }
+
+      const bossIndex = await this.resolveBossIndex(clanData, request);
+      if (bossIndex === null) {
+        return false;
+      }
+
+      const bossStatusData = clanData.bossStatusByLap.get(request.lap)?.[bossIndex];
+      if (!bossStatusData) {
+        await request.responseChannel.send({
+          content: USER_MESSAGES.errors.invalidLap,
+        });
+        return false;
+      }
+
+      const sameDayAttackEntries = this.findAttackEntriesForUserDay(
+        clanData.categoryId,
+        playerData.userId,
+        clanData.date,
+      );
+      const candidates = findCorrectableAttackEntriesState(
+        sameDayAttackEntries,
+        request.lap,
+        bossIndex,
+      );
+      if (candidates.length === 0) {
+        await request.responseChannel.send({
+          content: CORRECT_ATTACK_KIND_NOTHING_MESSAGE,
+        });
+        return false;
+      }
+
+      const selectedAttackEntryId =
+        candidates.length === 1
+          ? candidates[0]?.attackEntryId ?? null
+          : await request.selectAttackEntry?.({
+              member: request.member,
+              attackEntries: candidates,
+              responseChannel: request.responseChannel,
+            });
+      if (!selectedAttackEntryId) {
+        await request.responseChannel.send({
+          content: CORRECT_ATTACK_KIND_CANCELLED_MESSAGE,
+        });
+        return false;
+      }
+
+      const targetAttackEntry = candidates.find(
+        (attackEntry) => attackEntry.attackEntryId === selectedAttackEntryId,
+      );
+      if (!targetAttackEntry) {
+        await request.responseChannel.send({
+          content: CORRECT_ATTACK_KIND_NOTHING_MESSAGE,
+        });
+        return false;
+      }
+
+      const sameDayResourceAdjustments = this.findResourceAdjustmentsForUserDay(
+        clanData.categoryId,
+        playerData.userId,
+        clanData.date,
+      );
+      const correctionPreparation = prepareAttackKindCorrection({
+        sameDayAttackEntries,
+        sameDayResourceAdjustments,
+        targetAttackEntryId: targetAttackEntry.attackEntryId,
+      });
+      if (correctionPreparation.kind === "target-not-found") {
+        await request.responseChannel.send({
+          content: CORRECT_ATTACK_KIND_NOTHING_MESSAGE,
+        });
+        return false;
+      }
+
+      if (correctionPreparation.kind === "invalid-resource-progression") {
+        await request.responseChannel.send({
+          content: CORRECT_ATTACK_KIND_INVALID_MESSAGE,
+        });
+        return false;
+      }
+
+      const { nextKind, nextAttackType, simulatedAttackEntries } = correctionPreparation;
+      const runtimeAttackStatus = this.findRuntimeAttackStatus(clanData, targetAttackEntry);
+      if (!runtimeAttackStatus) {
+        await request.responseChannel.send({
+          content: CORRECT_ATTACK_KIND_NOTHING_MESSAGE,
+        });
+        return false;
+      }
+
+      const transitionAt = now(this.clock);
+
+      runInTransaction(this.options.database, () => {
+        targetAttackEntry.kind = nextKind;
+        this.attackEntryRepository.update(targetAttackEntry);
+        runtimeAttackStatus.setAttackType(nextAttackType);
+        this.attackStatusRepository.update(
+          clanData.categoryId,
+          targetAttackEntry.lap,
+          targetAttackEntry.bossIndex,
+          runtimeAttackStatus,
+        );
+        this.rebuildLegacyPlayerStateFromAttackEntries(playerData, simulatedAttackEntries);
+        this.playerRepository.update(clanData.categoryId, playerData);
+        this.carryOverRepository.replaceAll(clanData.categoryId, playerData.userId, playerData.carryOverList);
+        this.insertOperationLog({
+          categoryId: clanData.categoryId,
+          userId: playerData.userId,
+          dayKey: clanData.date,
+          lap: targetAttackEntry.lap,
+          bossIndex: targetAttackEntry.bossIndex,
+          targetAttackEntryId: targetAttackEntry.attackEntryId,
+          operationType: OperationLogType.CORRECT_KIND,
+          beforeKind:
+            nextKind === AttackEntryKind.BATTLE ? AttackEntryKind.CARRYOVER : AttackEntryKind.BATTLE,
+          afterKind: nextKind,
+          beforeStatus: targetAttackEntry.status,
+          afterStatus: targetAttackEntry.status,
+          occurredAt: transitionAt,
+        });
+        this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
+      });
+
+      await request.responseChannel.send({
+        content: `${request.member.displayName}の${request.lap}周目${bossIndex + 1}ボスの攻撃を\`${nextAttackType}\`に入替えます。`,
+      });
+      await this.updateProgressMessages(clanData, targetAttackEntry.lap, targetAttackEntry.bossIndex, request);
+      await this.syncNonProgressMessages(clanData, request, {
+        updateSummary: true,
+        updateRemainAttack: true,
+      });
       return true;
     });
   }
@@ -636,6 +1060,7 @@ export class AttackService {
 
       const clanData = this.options.runtimeStateService.get(request.categoryId);
       await this.ensureCurrentRemainAttackMessage(clanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(clanData, dayGuardResult, request);
       if (!clanData) {
         return false;
       }
@@ -650,163 +1075,720 @@ export class AttackService {
         return false;
       }
 
-      const parsedDamage = parseDamageMessage(request.messageContent);
-      if (!parsedDamage) {
+      const messageDamageTarget = findMessageDamageTargetState({
+        clanData,
+        bossIndex,
+        playerData,
+        messageContent: request.messageContent,
+      });
+      if (!messageDamageTarget) {
         return false;
       }
 
-      const lapList = [...clanData.progressMessageIdsByLap.keys()].sort((left, right) => right - left);
-      for (const lap of lapList) {
-        const bossStatusData = clanData.bossStatusByLap.get(lap)?.[bossIndex];
-        if (!bossStatusData) {
-          continue;
-        }
+      messageDamageTarget.attackStatus.damage = messageDamageTarget.parsedDamage.damage;
+      messageDamageTarget.attackStatus.memo = messageDamageTarget.parsedDamage.memo;
+      const transitionAt = now(this.clock);
 
-        const attackStatusIndex = bossStatusData.getAttackStatusIndex(playerData, false);
-        if (attackStatusIndex === undefined) {
-          continue;
-        }
+      runInTransaction(this.options.database, () => {
+        this.attackStatusRepository.update(
+          clanData.categoryId,
+          messageDamageTarget.lap,
+          bossIndex,
+          messageDamageTarget.attackStatus,
+        );
+        this.upsertAttackEntrySnapshot(
+          clanData.categoryId,
+          clanData.date,
+          messageDamageTarget.lap,
+          bossIndex,
+          messageDamageTarget.attackStatus,
+        );
+        this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
+      });
 
-        const attackStatus = bossStatusData.attackPlayers[attackStatusIndex];
-        if (!attackStatus) {
-          continue;
-        }
-
-        attackStatus.damage = parsedDamage.damage;
-        attackStatus.memo = parsedDamage.memo;
-
-        runInTransaction(this.options.database, () => {
-          this.attackStatusRepository.update(clanData.categoryId, lap, bossIndex, attackStatus);
-        });
-
-        await this.updateProgressMessages(clanData, lap, bossIndex, request);
-        return true;
-      }
-
-      return false;
+      await this.updateProgressMessages(clanData, messageDamageTarget.lap, bossIndex, request);
+      await this.syncNonProgressMessages(clanData, request, {
+        updateSummary: true,
+      });
+      return true;
     });
   }
 
   private async validateAttackRequest(
     request: AttackServiceBaseRequest,
   ): Promise<ValidatedAttackRequest | null> {
-    const clanData = this.options.runtimeStateService.get(request.categoryId);
-    if (!clanData) {
-      await request.responseChannel.send({
-        content: USER_MESSAGES.errors.categoryRequired,
-      });
-      return null;
-    }
-
-    const bossIndex = await this.resolveBossIndex(clanData, request);
-    if (bossIndex === null) {
-      return null;
-    }
-
-    let lap: number;
-    try {
-      lap = clanData.getLatestLap(bossIndex);
-    } catch {
-      await request.responseChannel.send({
-        content: USER_MESSAGES.errors.invalidLap,
-      });
-      return null;
-    }
-
-    if (request.lap !== undefined) {
-      if (lap < request.lap || !clanData.progressMessageIdsByLap.has(request.lap)) {
-        await request.responseChannel.send({
-          content: USER_MESSAGES.errors.invalidLap,
-        });
-        return null;
-      }
-
-      lap = request.lap;
-    }
-
-    this.ensureBossStatusRowsForExistingLap(clanData, lap);
-
-    const playerData = clanData.getPlayerData(request.member.id);
-    if (!playerData) {
-      await request.responseChannel.send({
-        content: formatNotManagedMessage(request.member.displayName),
-      });
-      return null;
-    }
-
-    return {
-      clanData,
-      playerData,
-      lap,
-      bossIndex,
-    };
+    return validateAttackRequestState(request, {
+      getClanData: (categoryId) => this.options.runtimeStateService.get(categoryId),
+      ensureBossStatusRowsForExistingLap: (clanData, lap) =>
+        this.ensureBossStatusRowsForExistingLap(clanData, lap),
+    });
   }
 
   private async resolveDeclaredAttack(
     validation: ValidatedAttackRequest,
     request: AttackServiceBaseRequest,
   ): Promise<ValidatedResolutionRequest | null> {
-    const bossStatusData = validation.clanData.bossStatusByLap.get(validation.lap)?.[validation.bossIndex];
-    if (!bossStatusData) {
-      await request.responseChannel.send({
-        content: USER_MESSAGES.errors.invalidLap,
-      });
-      return null;
-    }
+    return resolveDeclaredAttackState(validation, request);
+  }
 
-    const attackStatusIndex = bossStatusData.getAttackStatusIndex(validation.playerData, false);
-    if (attackStatusIndex === undefined) {
-      await request.responseChannel.send({
-        content: ATTACK_NOT_DECLARED_MESSAGE,
-      });
-      return null;
-    }
+  private normalizeAttackEntryDamage(damage: number): number | null {
+    return normalizeAttackEntryDamageValue(damage);
+  }
 
-    const attackStatus = bossStatusData.attackPlayers[attackStatusIndex];
-    if (!attackStatus) {
-      await request.responseChannel.send({
-        content: ATTACK_NOT_DECLARED_MESSAGE,
-      });
-      return null;
-    }
+  private normalizeAttackEntryMemo(memo: string): string | null {
+    return normalizeAttackEntryMemoValue(memo);
+  }
 
-    return {
-      ...validation,
-      bossStatusData,
+  private findExistingAttackEntry(
+    categoryId: string,
+    userId: string,
+    lap: number,
+    bossIndex: number,
+    attackStatus: AttackStatus,
+  ): AttackEntry | null {
+    return findExistingAttackEntryRecord({
+      attackEntryRepository: this.attackEntryRepository,
+      categoryId,
+      userId,
+      lap,
+      bossIndex,
       attackStatus,
-    };
+    });
+  }
+
+  private createAttackEntryFromAttackStatus(
+    categoryId: string,
+    dayKey: string,
+    lap: number,
+    bossIndex: number,
+    attackStatus: AttackStatus,
+  ): AttackEntry {
+    return createAttackEntryFromAttackStatusRecord({
+      categoryId,
+      dayKey,
+      lap,
+      bossIndex,
+      attackStatus,
+    });
+  }
+
+  private upsertAttackEntrySnapshot(
+    categoryId: string,
+    dayKey: string,
+    lap: number,
+    bossIndex: number,
+    attackStatus: AttackStatus,
+  ): AttackEntry {
+    return upsertAttackEntrySnapshotRecord({
+      attackEntryRepository: this.attackEntryRepository,
+      categoryId,
+      dayKey,
+      lap,
+      bossIndex,
+      attackStatus,
+    });
+  }
+
+  private insertOperationLog(params: {
+    categoryId: string;
+    userId: string;
+    dayKey: string;
+    lap: number;
+    bossIndex: number;
+    targetAttackEntryId: string;
+    operationType: OperationLogType;
+    beforeKind?: AttackEntryKind | null;
+    afterKind?: AttackEntryKind | null;
+    beforeStatus?: AttackEntryStatus | null;
+    afterStatus?: AttackEntryStatus | null;
+    occurredAt: Date;
+  }): void {
+    this.operationLogRepository.insert(
+      new OperationLog({
+        operationId: randomUUID(),
+        categoryId: params.categoryId,
+        userId: params.userId,
+        dayKey: params.dayKey,
+        lap: params.lap,
+        bossIndex: params.bossIndex,
+        targetAttackEntryId: params.targetAttackEntryId,
+        operationType: params.operationType,
+        beforeKind: params.beforeKind ?? null,
+        afterKind: params.afterKind ?? null,
+        beforeStatus: params.beforeStatus ?? null,
+        afterStatus: params.afterStatus ?? null,
+        occurredAt: params.occurredAt,
+      }),
+    );
+  }
+
+  private expirePendingAttackEntriesAfterDefeat(
+    clanData: ClanData,
+    bossStatusData: BossStatusData,
+    lap: number,
+    bossIndex: number,
+    resolvedAttackStatus: AttackStatus,
+    transitionAt: Date,
+  ): void {
+    for (const attackStatus of bossStatusData.attackPlayers) {
+      if (attackStatus === resolvedAttackStatus || attackStatus.attacked) {
+        continue;
+      }
+
+      const existing = this.findExistingAttackEntry(
+        clanData.categoryId,
+        attackStatus.playerData.userId,
+        lap,
+        bossIndex,
+        attackStatus,
+      );
+      const attackEntry =
+        existing ??
+        this.createAttackEntryFromAttackStatus(
+          clanData.categoryId,
+          clanData.date,
+          lap,
+          bossIndex,
+          attackStatus,
+        );
+
+      if (attackEntry.status === AttackEntryStatus.EXPIRED) {
+        continue;
+      }
+
+      const beforeStatus = attackEntry.status;
+      attackEntry.status = AttackEntryStatus.EXPIRED;
+      attackEntry.resolvedAt = transitionAt;
+      attackEntry.damage = this.normalizeAttackEntryDamage(attackStatus.damage);
+      attackEntry.memo = this.normalizeAttackEntryMemo(attackStatus.memo);
+
+      if (existing) {
+        this.attackEntryRepository.update(attackEntry);
+      } else {
+        this.attackEntryRepository.insert(attackEntry);
+      }
+
+      this.insertOperationLog({
+        categoryId: clanData.categoryId,
+        userId: attackEntry.userId,
+        dayKey: attackEntry.dayKey,
+        lap,
+        bossIndex,
+        targetAttackEntryId: attackEntry.attackEntryId,
+        operationType: OperationLogType.EXPIRE,
+        beforeKind: attackEntry.kind,
+        afterKind: attackEntry.kind,
+        beforeStatus,
+        afterStatus: AttackEntryStatus.EXPIRED,
+        occurredAt: transitionAt,
+      });
+    }
+  }
+
+  private syncProjectedStateForCategory(
+    categoryId: string,
+    dayKey: string,
+    transitionAt: Date,
+  ): void {
+    this.options.runtimeStateService.syncProjectedStateForCategory(categoryId, dayKey, transitionAt);
+  }
+
+  private findAttackEntriesForUserDay(
+    categoryId: string,
+    userId: string,
+    dayKey: string,
+  ): AttackEntry[] {
+    return this.options.runtimeStateService
+      .getAttackEntries(categoryId)
+      .filter((attackEntry) => attackEntry.userId === userId && attackEntry.dayKey === dayKey)
+      .sort((left, right) => {
+        const declaredDiff = left.declaredAt.getTime() - right.declaredAt.getTime();
+        if (declaredDiff !== 0) {
+          return declaredDiff;
+        }
+
+        return left.attackEntryId.localeCompare(right.attackEntryId);
+      });
+  }
+
+  private findResourceAdjustmentsForUserDay(
+    categoryId: string,
+    userId: string,
+    dayKey: string,
+  ) {
+    return this.resourceAdjustmentRepository
+      .findAllByCategory(categoryId)
+      .filter(
+        (resourceAdjustment) =>
+          resourceAdjustment.userId === userId && resourceAdjustment.dayKey === dayKey,
+      );
+  }
+
+  private isProjectedLegacyStateInSync(
+    categoryId: string,
+    playerData: PlayerData,
+    dayKey: string,
+  ): boolean {
+    const projectedState = this.options.runtimeStateService.getPlayerResourceState(
+      categoryId,
+      playerData.userId,
+      dayKey,
+    );
+
+    if (!projectedState) {
+      return false;
+    }
+
+    return (
+      playerData.battleAttackCount === projectedState.battleConsumedCount &&
+      playerData.carryOverList.length === projectedState.carryAvailableCount
+    );
+  }
+
+  private findMatchingLegacyLogIndex(
+    logList: readonly LogData[],
+    operationLog: OperationLog,
+  ): number | undefined {
+    const targetOperationType = toLegacyOperationTypeState(operationLog.operationType);
+
+    for (let index = logList.length - 1; index >= 0; index -= 1) {
+      const logData = logList[index];
+      if (!logData) {
+        continue;
+      }
+
+      if (
+        logData.operationType === targetOperationType &&
+        logData.lap === operationLog.lap &&
+        logData.bossIndex === operationLog.bossIndex
+      ) {
+        return index;
+      }
+    }
+
+    return undefined;
+  }
+
+  private findRuntimeAttackStatus(
+    clanData: ClanData,
+    attackEntry: AttackEntry,
+  ): AttackStatus | null {
+    const attackPlayers =
+      clanData.bossStatusByLap.get(attackEntry.lap)?.[attackEntry.bossIndex]?.attackPlayers ?? [];
+
+    return (
+      attackPlayers.find(
+        (attackStatus) =>
+          attackStatus.playerData.userId === attackEntry.userId &&
+          attackStatus.created.getTime() === attackEntry.declaredAt.getTime(),
+      ) ?? null
+    );
+  }
+
+  private createRuntimeAttackStatusFromAttackEntry(
+    playerData: PlayerData,
+    attackEntry: AttackEntry,
+  ): AttackStatus {
+    return new AttackStatus({
+      playerData,
+      attackType:
+        attackEntry.kind === AttackEntryKind.CARRYOVER
+          ? AttackType.CARRYOVER
+          : AttackType.BATTLE,
+      carryOver: attackEntry.kind === AttackEntryKind.CARRYOVER,
+      attacked:
+        attackEntry.status === AttackEntryStatus.FINISHED ||
+        attackEntry.status === AttackEntryStatus.DEFEATED,
+      damage: attackEntry.damage ?? 0,
+      memo: attackEntry.memo ?? "",
+      created: attackEntry.declaredAt,
+    });
+  }
+
+  private persistLegacyProjectionState(clanData: ClanData): void {
+    for (const playerData of clanData.playerDataMap.values()) {
+      this.playerRepository.update(clanData.categoryId, playerData);
+      this.carryOverRepository.replaceAll(
+        clanData.categoryId,
+        playerData.userId,
+        playerData.carryOverList,
+      );
+    }
+  }
+
+  private rebuildLegacyPlayerStateFromAttackEntries(
+    playerData: PlayerData,
+    attackEntries: readonly AttackEntry[],
+  ): void {
+    const committedCarryAttackEntries = attackEntries.filter(
+      (attackEntry) =>
+        attackEntry.kind === AttackEntryKind.CARRYOVER &&
+        (attackEntry.status === AttackEntryStatus.DECLARED ||
+          attackEntry.status === AttackEntryStatus.FINISHED ||
+          attackEntry.status === AttackEntryStatus.DEFEATED),
+    );
+    const producedCarryOvers = attackEntries
+      .filter(
+        (attackEntry) =>
+          attackEntry.kind === AttackEntryKind.BATTLE &&
+          attackEntry.status === AttackEntryStatus.DEFEATED,
+      )
+      .map(
+        (attackEntry) =>
+          new CarryOver({
+            attackType: AttackType.BATTLE,
+            bossIndex: attackEntry.bossIndex,
+            created: attackEntry.resolvedAt ?? attackEntry.declaredAt,
+          }),
+      )
+      .sort(compareCarryOversOldestFirst);
+
+    playerData.battleAttackCount = attackEntries.filter(
+      (attackEntry) =>
+        attackEntry.kind === AttackEntryKind.BATTLE &&
+        (attackEntry.status === AttackEntryStatus.FINISHED ||
+          attackEntry.status === AttackEntryStatus.DEFEATED),
+    ).length;
+    playerData.carryOverList = producedCarryOvers.slice(
+      Math.min(committedCarryAttackEntries.length, producedCarryOvers.length),
+    );
+  }
+
+  private invalidateLatestOperationLog(params: {
+    categoryId: string;
+    userId: string;
+    lap: number;
+    bossIndex: number;
+    targetAttackEntryId: string;
+    operationType: OperationLogType;
+    transitionAt: Date;
+  }): OperationLog | null {
+    const targetOperationLog = this.operationLogRepository
+      .findAllByCategory(params.categoryId)
+      .filter(
+        (operationLog) =>
+          operationLog.userId === params.userId &&
+          operationLog.lap === params.lap &&
+          operationLog.bossIndex === params.bossIndex &&
+          operationLog.targetAttackEntryId === params.targetAttackEntryId &&
+          operationLog.operationType === params.operationType &&
+          operationLog.invalidatedAt === null,
+      )
+      .sort((left, right) => {
+        const occurredAtDiff = right.occurredAt.getTime() - left.occurredAt.getTime();
+        if (occurredAtDiff !== 0) {
+          return occurredAtDiff;
+        }
+
+        return right.operationId.localeCompare(left.operationId);
+      })[0] ?? null;
+
+    if (!targetOperationLog) {
+      return null;
+    }
+
+    targetOperationLog.invalidatedAt = params.transitionAt;
+    this.operationLogRepository.update(targetOperationLog);
+    return targetOperationLog;
+  }
+
+  private restoreExpiredAttackEntriesAfterDefeatUndo(params: {
+    categoryId: string;
+    lap: number;
+    bossIndex: number;
+    defeatOccurredAt: Date | null;
+    transitionAt: Date;
+  }): void {
+    if (!params.defeatOccurredAt) {
+      return;
+    }
+
+    const defeatOccurredAtTime = params.defeatOccurredAt.getTime();
+
+    const expireOperationLogs = this.operationLogRepository
+      .findAllByCategory(params.categoryId)
+      .filter(
+        (operationLog) =>
+          operationLog.operationType === OperationLogType.EXPIRE &&
+          operationLog.lap === params.lap &&
+          operationLog.bossIndex === params.bossIndex &&
+          operationLog.invalidatedAt === null &&
+          operationLog.occurredAt.getTime() === defeatOccurredAtTime,
+      );
+
+    for (const expireOperationLog of expireOperationLogs) {
+      const attackEntry = this.attackEntryRepository.findById(expireOperationLog.targetAttackEntryId);
+      if (!attackEntry || attackEntry.status !== AttackEntryStatus.EXPIRED) {
+        expireOperationLog.invalidatedAt = params.transitionAt;
+        this.operationLogRepository.update(expireOperationLog);
+        continue;
+      }
+
+      attackEntry.status = AttackEntryStatus.DECLARED;
+      attackEntry.resolvedAt = null;
+      this.attackEntryRepository.update(attackEntry);
+
+      expireOperationLog.invalidatedAt = params.transitionAt;
+      this.operationLogRepository.update(expireOperationLog);
+    }
+  }
+
+  private async undoAttackDeclareFromOperation(
+    clanData: ClanData,
+    operationTarget: UndoOperationTarget,
+    request: UndoAttackRequest,
+  ): Promise<boolean> {
+    const playerData = clanData.getPlayerData(operationTarget.attackEntry.userId);
+    if (!playerData) {
+      return false;
+    }
+
+    const bossStatusData =
+      clanData.bossStatusByLap.get(operationTarget.attackEntry.lap)?.[
+        operationTarget.attackEntry.bossIndex
+      ];
+    if (!bossStatusData) {
+      return true;
+    }
+
+    const runtimeAttackStatus =
+      this.findRuntimeAttackStatus(clanData, operationTarget.attackEntry) ??
+      this.createRuntimeAttackStatusFromAttackEntry(playerData, operationTarget.attackEntry);
+    const attackStatusIndex = bossStatusData.attackPlayers.findIndex(
+      (attackStatus) =>
+        attackStatus.playerData.userId === runtimeAttackStatus.playerData.userId &&
+        attackStatus.created.getTime() === runtimeAttackStatus.created.getTime(),
+    );
+    const transitionAt = now(this.clock);
+    const isProjectedLegacyStateInSync = this.isProjectedLegacyStateInSync(
+      clanData.categoryId,
+      playerData,
+      clanData.date,
+    );
+    const matchingLegacyLogIndex = this.findMatchingLegacyLogIndex(
+      playerData.log,
+      operationTarget.operationLog,
+    );
+
+    if (attackStatusIndex !== -1) {
+      bossStatusData.attackPlayers.splice(attackStatusIndex, 1);
+    }
+
+    if (matchingLegacyLogIndex !== undefined) {
+      playerData.log.splice(matchingLegacyLogIndex, 1);
+    }
+
+    runInTransaction(this.options.database, () => {
+      this.attackStatusRepository.delete(
+        clanData.categoryId,
+        operationTarget.attackEntry.lap,
+        operationTarget.attackEntry.bossIndex,
+        runtimeAttackStatus,
+      );
+      operationTarget.attackEntry.status = AttackEntryStatus.UNDONE;
+      operationTarget.attackEntry.resolvedAt = transitionAt;
+      this.attackEntryRepository.update(operationTarget.attackEntry);
+      this.invalidateLatestOperationLog({
+        categoryId: clanData.categoryId,
+        userId: operationTarget.attackEntry.userId,
+        lap: operationTarget.attackEntry.lap,
+        bossIndex: operationTarget.attackEntry.bossIndex,
+        targetAttackEntryId: operationTarget.attackEntry.attackEntryId,
+        operationType: operationTarget.operationLog.operationType,
+        transitionAt,
+      });
+      this.insertOperationLog({
+        categoryId: clanData.categoryId,
+        userId: operationTarget.attackEntry.userId,
+        dayKey: clanData.date,
+        lap: operationTarget.attackEntry.lap,
+        bossIndex: operationTarget.attackEntry.bossIndex,
+        targetAttackEntryId: operationTarget.attackEntry.attackEntryId,
+        operationType: OperationLogType.UNDO,
+        beforeKind: operationTarget.attackEntry.kind,
+        afterKind: operationTarget.attackEntry.kind,
+        beforeStatus: AttackEntryStatus.DECLARED,
+        afterStatus: AttackEntryStatus.UNDONE,
+        occurredAt: transitionAt,
+      });
+      this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
+      if (isProjectedLegacyStateInSync) {
+        this.rebuildLegacyPlayerStateFromAttackEntries(
+          playerData,
+          this.findAttackEntriesForUserDay(
+            clanData.categoryId,
+            playerData.userId,
+            clanData.date,
+          ),
+        );
+      }
+      this.persistLegacyProjectionState(clanData);
+    });
+
+    await this.updateProgressMessages(
+      clanData,
+      operationTarget.attackEntry.lap,
+      operationTarget.attackEntry.bossIndex,
+      request,
+    );
+    await this.syncNonProgressMessages(clanData, request, {
+      updateSummary: true,
+      updateRemainAttack: true,
+    });
+    return true;
+  }
+
+  private async undoResolvedAttackFromOperation(
+    clanData: ClanData,
+    operationTarget: UndoOperationTarget,
+    request: UndoAttackRequest,
+  ): Promise<boolean> {
+    const playerData = clanData.getPlayerData(operationTarget.attackEntry.userId);
+    if (!playerData) {
+      return false;
+    }
+
+    const bossStatusData =
+      clanData.bossStatusByLap.get(operationTarget.attackEntry.lap)?.[
+        operationTarget.attackEntry.bossIndex
+      ];
+    if (!bossStatusData) {
+      return true;
+    }
+
+    const runtimeAttackStatus =
+      this.findRuntimeAttackStatus(clanData, operationTarget.attackEntry) ??
+      this.createRuntimeAttackStatusFromAttackEntry(playerData, operationTarget.attackEntry);
+    const transitionAt = now(this.clock);
+    const defeatOccurredAt =
+      operationTarget.operationLog.operationType === OperationLogType.DEFEAT
+        ? operationTarget.attackEntry.resolvedAt
+        : null;
+    const isProjectedLegacyStateInSync = this.isProjectedLegacyStateInSync(
+      clanData.categoryId,
+      playerData,
+      clanData.date,
+    );
+    const matchingLegacyLogIndex = this.findMatchingLegacyLogIndex(
+      playerData.log,
+      operationTarget.operationLog,
+    );
+    const matchingLegacyLog =
+      matchingLegacyLogIndex === undefined ? null : playerData.log[matchingLegacyLogIndex] ?? null;
+
+    runtimeAttackStatus.attacked = false;
+    if (operationTarget.operationLog.operationType === OperationLogType.DEFEAT) {
+      bossStatusData.beated = false;
+    }
+
+    if (!isProjectedLegacyStateInSync && matchingLegacyLog?.playerData) {
+      playerData.applySnapshot(matchingLegacyLog.playerData);
+    }
+    if (matchingLegacyLogIndex !== undefined) {
+      playerData.log.splice(matchingLegacyLogIndex, 1);
+    }
+
+    runInTransaction(this.options.database, () => {
+      this.attackStatusRepository.reverse(
+        clanData.categoryId,
+        operationTarget.attackEntry.lap,
+        operationTarget.attackEntry.bossIndex,
+        runtimeAttackStatus,
+      );
+      if (operationTarget.operationLog.operationType === OperationLogType.DEFEAT) {
+        this.bossStatusRepository.update(clanData.categoryId, bossStatusData);
+      }
+
+      operationTarget.attackEntry.status = AttackEntryStatus.DECLARED;
+      operationTarget.attackEntry.resolvedAt = null;
+      this.attackEntryRepository.update(operationTarget.attackEntry);
+      this.invalidateLatestOperationLog({
+        categoryId: clanData.categoryId,
+        userId: operationTarget.attackEntry.userId,
+        lap: operationTarget.attackEntry.lap,
+        bossIndex: operationTarget.attackEntry.bossIndex,
+        targetAttackEntryId: operationTarget.attackEntry.attackEntryId,
+        operationType: operationTarget.operationLog.operationType,
+        transitionAt,
+      });
+
+      if (operationTarget.operationLog.operationType === OperationLogType.DEFEAT) {
+        this.restoreExpiredAttackEntriesAfterDefeatUndo({
+          categoryId: clanData.categoryId,
+          lap: operationTarget.attackEntry.lap,
+          bossIndex: operationTarget.attackEntry.bossIndex,
+          defeatOccurredAt,
+          transitionAt,
+        });
+      }
+
+      this.insertOperationLog({
+        categoryId: clanData.categoryId,
+        userId: operationTarget.attackEntry.userId,
+        dayKey: clanData.date,
+        lap: operationTarget.attackEntry.lap,
+        bossIndex: operationTarget.attackEntry.bossIndex,
+        targetAttackEntryId: operationTarget.attackEntry.attackEntryId,
+        operationType: OperationLogType.UNDO,
+        beforeKind: operationTarget.attackEntry.kind,
+        afterKind: operationTarget.attackEntry.kind,
+        beforeStatus:
+          operationTarget.operationLog.operationType === OperationLogType.DEFEAT
+            ? AttackEntryStatus.DEFEATED
+            : AttackEntryStatus.FINISHED,
+        afterStatus: AttackEntryStatus.DECLARED,
+        occurredAt: transitionAt,
+      });
+      this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
+      if (isProjectedLegacyStateInSync) {
+        this.rebuildLegacyPlayerStateFromAttackEntries(
+          playerData,
+          this.findAttackEntriesForUserDay(
+            clanData.categoryId,
+            playerData.userId,
+            clanData.date,
+          ),
+        );
+      }
+      this.persistLegacyProjectionState(clanData);
+    });
+
+    if (operationTarget.operationLog.operationType === OperationLogType.DEFEAT) {
+      await this.cleanupGeneratedNextLapState(
+        clanData,
+        {
+          lap: operationTarget.attackEntry.lap,
+          bossIndex: operationTarget.attackEntry.bossIndex,
+        },
+        request,
+      );
+    }
+
+    await this.updateProgressMessages(
+      clanData,
+      operationTarget.attackEntry.lap,
+      operationTarget.attackEntry.bossIndex,
+      request,
+    );
+    await this.syncNonProgressMessages(clanData, request, {
+      updateSummary: true,
+      updateRemainAttack: true,
+    });
+    return true;
   }
 
   private async resolveBossIndex(
     clanData: ClanData,
     request: AttackServiceBaseRequest,
   ): Promise<number | null> {
-    if (request.bossNumber === undefined) {
-      const bossIndex = clanData.getBossIndexFromChannelId(request.channelId);
-      if (bossIndex === undefined) {
-        await request.responseChannel.send({
-          content: USER_MESSAGES.errors.bossNumberRequired,
-        });
-        return null;
-      }
-
-      return bossIndex;
-    }
-
-    if (!(0 < request.bossNumber && request.bossNumber < 6)) {
-      await request.responseChannel.send({
-        content: USER_MESSAGES.errors.invalidBossNumber,
-      });
-      return null;
-    }
-
-    return request.bossNumber - 1;
+    return resolveAttackBossIndex(clanData, request);
   }
 
   private async undoAttackDeclare(
     clanData: ClanData,
     playerData: PlayerData,
     logData: LogData,
+    logIndex: number,
     bossStatusData: BossStatusData,
     request: UndoAttackRequest,
   ): Promise<boolean> {
@@ -820,14 +1802,70 @@ export class AttackService {
       return true;
     }
 
+    const transitionAt = now(this.clock);
+    const existingAttackEntry = this.findExistingAttackEntry(
+      clanData.categoryId,
+      playerData.userId,
+      logData.lap,
+      logData.bossIndex,
+      attackStatus,
+    );
+    const attackEntry =
+      existingAttackEntry ??
+      this.createAttackEntryFromAttackStatus(
+        clanData.categoryId,
+        clanData.date,
+        logData.lap,
+        logData.bossIndex,
+        attackStatus,
+      );
+    const beforeStatus = attackEntry.status;
+
     bossStatusData.attackPlayers.splice(attackStatusIndex, 1);
-    playerData.log.pop();
+    playerData.log.splice(logIndex, 1);
 
     runInTransaction(this.options.database, () => {
       this.attackStatusRepository.delete(clanData.categoryId, logData.lap, logData.bossIndex, attackStatus);
+      attackEntry.status = AttackEntryStatus.UNDONE;
+      attackEntry.resolvedAt = transitionAt;
+      attackEntry.damage = this.normalizeAttackEntryDamage(attackStatus.damage);
+      attackEntry.memo = this.normalizeAttackEntryMemo(attackStatus.memo);
+      if (existingAttackEntry) {
+        this.attackEntryRepository.update(attackEntry);
+      } else {
+        this.attackEntryRepository.insert(attackEntry);
+      }
+
+      this.invalidateLatestOperationLog({
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        lap: logData.lap,
+        bossIndex: logData.bossIndex,
+        targetAttackEntryId: attackEntry.attackEntryId,
+        operationType: toOperationLogTypeState(logData.operationType),
+        transitionAt,
+      });
+      this.insertOperationLog({
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        dayKey: clanData.date,
+        lap: logData.lap,
+        bossIndex: logData.bossIndex,
+        targetAttackEntryId: attackEntry.attackEntryId,
+        operationType: OperationLogType.UNDO,
+        beforeKind: attackEntry.kind,
+        afterKind: attackEntry.kind,
+        beforeStatus,
+        afterStatus: AttackEntryStatus.UNDONE,
+        occurredAt: transitionAt,
+      });
+      this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
     });
 
     await this.updateProgressMessages(clanData, logData.lap, logData.bossIndex, request);
+    await this.syncNonProgressMessages(clanData, request, {
+      updateSummary: true,
+    });
     return true;
   }
 
@@ -835,6 +1873,7 @@ export class AttackService {
     clanData: ClanData,
     playerData: PlayerData,
     logData: LogData,
+    logIndex: number,
     bossStatusData: BossStatusData,
     request: UndoAttackRequest,
   ): Promise<boolean> {
@@ -848,6 +1887,26 @@ export class AttackService {
       return true;
     }
 
+    const transitionAt = now(this.clock);
+    const existingAttackEntry = this.findExistingAttackEntry(
+      clanData.categoryId,
+      playerData.userId,
+      logData.lap,
+      logData.bossIndex,
+      attackStatus,
+    );
+    const attackEntry =
+      existingAttackEntry ??
+      this.createAttackEntryFromAttackStatus(
+        clanData.categoryId,
+        clanData.date,
+        logData.lap,
+        logData.bossIndex,
+        attackStatus,
+      );
+    const beforeStatus = attackEntry.status;
+    const defeatOccurredAt = logData.operationType === OperationType.LAST_ATTACK ? attackEntry.resolvedAt : null;
+
     if (logData.playerData) {
       playerData.applySnapshot(logData.playerData);
     }
@@ -858,7 +1917,7 @@ export class AttackService {
       bossStatusData.beated = logData.beated;
     }
 
-    playerData.log.pop();
+    playerData.log.splice(logIndex, 1);
 
     runInTransaction(this.options.database, () => {
       this.attackStatusRepository.reverse(clanData.categoryId, logData.lap, logData.bossIndex, attackStatus);
@@ -869,6 +1928,52 @@ export class AttackService {
 
       this.playerRepository.update(clanData.categoryId, playerData);
       this.carryOverRepository.replaceAll(clanData.categoryId, playerData.userId, playerData.carryOverList);
+
+      attackEntry.status = AttackEntryStatus.DECLARED;
+      attackEntry.resolvedAt = null;
+      attackEntry.damage = this.normalizeAttackEntryDamage(attackStatus.damage);
+      attackEntry.memo = this.normalizeAttackEntryMemo(attackStatus.memo);
+      if (existingAttackEntry) {
+        this.attackEntryRepository.update(attackEntry);
+      } else {
+        this.attackEntryRepository.insert(attackEntry);
+      }
+
+      this.invalidateLatestOperationLog({
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        lap: logData.lap,
+        bossIndex: logData.bossIndex,
+        targetAttackEntryId: attackEntry.attackEntryId,
+        operationType: toOperationLogTypeState(logData.operationType),
+        transitionAt,
+      });
+
+      if (logData.operationType === OperationType.LAST_ATTACK) {
+        this.restoreExpiredAttackEntriesAfterDefeatUndo({
+          categoryId: clanData.categoryId,
+          lap: logData.lap,
+          bossIndex: logData.bossIndex,
+          defeatOccurredAt,
+          transitionAt,
+        });
+      }
+
+      this.insertOperationLog({
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        dayKey: clanData.date,
+        lap: logData.lap,
+        bossIndex: logData.bossIndex,
+        targetAttackEntryId: attackEntry.attackEntryId,
+        operationType: OperationLogType.UNDO,
+        beforeKind: attackEntry.kind,
+        afterKind: attackEntry.kind,
+        beforeStatus,
+        afterStatus: AttackEntryStatus.DECLARED,
+        occurredAt: transitionAt,
+      });
+      this.syncProjectedStateForCategory(clanData.categoryId, clanData.date, transitionAt);
     });
 
     if (logData.operationType === OperationType.LAST_ATTACK) {
@@ -876,158 +1981,27 @@ export class AttackService {
     }
 
     await this.updateProgressMessages(clanData, logData.lap, logData.bossIndex, request);
-    await this.updateRemainAttackMessage(clanData, request);
+    await this.syncNonProgressMessages(clanData, request, {
+      updateSummary: true,
+      updateRemainAttack: true,
+    });
     return true;
   }
 
-  private isDefeatUndoBlockedByNextLap(clanData: ClanData, logData: LogData): boolean {
-    const nextLap = logData.lap + 1;
-    return hasAnyAttackPlayers(clanData.bossStatusByLap.get(nextLap)?.[logData.bossIndex]);
+  private isDefeatUndoBlockedByNextLap(
+    clanData: ClanData,
+    context: { lap: number; bossIndex: number },
+  ): boolean {
+    const nextLap = context.lap + 1;
+    return hasAnyAttackPlayers(clanData.bossStatusByLap.get(nextLap)?.[context.bossIndex]);
   }
 
   private async cleanupGeneratedNextLapState(
     clanData: ClanData,
-    logData: LogData,
+    context: { lap: number; bossIndex: number },
     request: UndoAttackRequest,
   ): Promise<void> {
-    const nextLap = logData.lap + 1;
-    const bossIndex = logData.bossIndex;
-
-    await this.clearProgressMessageSlot(clanData, nextLap, bossIndex, request);
-
-    if (!hasAnyMessageIds(clanData.progressMessageIdsByLap.get(nextLap))) {
-      await this.clearSummaryLap(clanData, nextLap, request);
-      return;
-    }
-
-    await this.clearSummaryMessageSlot(clanData, nextLap, bossIndex, request);
-  }
-
-  private async clearProgressMessageSlot(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    request: UndoAttackRequest,
-  ): Promise<void> {
-    const messageIds = clanData.progressMessageIdsByLap.get(lap);
-    const messageId = messageIds?.[bossIndex];
-
-    if (messageId) {
-      try {
-        const bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-        await this.deleteMessageWithRetry(
-          bossChannel,
-          messageId,
-          "progress",
-          clanData.categoryId,
-          lap,
-          bossIndex,
-        );
-      } catch (error) {
-        this.logger.warn("Failed to resolve boss channel for progress cleanup", {
-          categoryId: clanData.categoryId,
-          lap,
-          bossIndex,
-          error,
-        });
-      }
-    }
-
-    if (!messageIds) {
-      return;
-    }
-
-    messageIds[bossIndex] = null;
-    if (hasAnyMessageIds(messageIds)) {
-      this.progressMessageIdRepository.update(clanData.categoryId, lap, messageIds);
-      return;
-    }
-
-    clanData.progressMessageIdsByLap.delete(lap);
-    this.progressMessageIdRepository.deleteByLap(clanData.categoryId, lap);
-  }
-
-  private async clearSummaryMessageSlot(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    request: UndoAttackRequest,
-  ): Promise<void> {
-    const summaryMessageIds = clanData.summaryMessageIdsByLap.get(lap);
-    const summaryMessageId = summaryMessageIds?.[bossIndex];
-
-    if (summaryMessageId) {
-      try {
-        const summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-        await this.deleteMessageWithRetry(
-          summaryChannel,
-          summaryMessageId,
-          "summary",
-          clanData.categoryId,
-          lap,
-          bossIndex,
-        );
-      } catch (error) {
-        this.logger.warn("Failed to resolve summary channel for cleanup", {
-          categoryId: clanData.categoryId,
-          lap,
-          bossIndex,
-          error,
-        });
-      }
-    }
-
-    if (!summaryMessageIds) {
-      return;
-    }
-
-    summaryMessageIds[bossIndex] = null;
-    if (hasAnyMessageIds(summaryMessageIds)) {
-      this.summaryMessageIdRepository.update(clanData.categoryId, lap, summaryMessageIds);
-      return;
-    }
-
-    clanData.summaryMessageIdsByLap.delete(lap);
-    this.summaryMessageIdRepository.deleteByLap(clanData.categoryId, lap);
-  }
-
-  private async clearSummaryLap(
-    clanData: ClanData,
-    lap: number,
-    request: UndoAttackRequest,
-  ): Promise<void> {
-    const summaryMessageIds = clanData.summaryMessageIdsByLap.get(lap);
-    if (summaryMessageIds) {
-      for (let bossIndex = 0; bossIndex < summaryMessageIds.length; bossIndex += 1) {
-        const summaryMessageId = summaryMessageIds[bossIndex];
-        if (!summaryMessageId) {
-          continue;
-        }
-
-        try {
-          const summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-          await this.deleteMessageWithRetry(
-            summaryChannel,
-            summaryMessageId,
-            "summary",
-            clanData.categoryId,
-            lap,
-            bossIndex,
-          );
-        } catch (error) {
-          this.logger.warn("Failed to resolve summary channel for lap cleanup", {
-            categoryId: clanData.categoryId,
-            lap,
-            bossIndex,
-            error,
-          });
-          break;
-        }
-      }
-    }
-
-    clanData.summaryMessageIdsByLap.delete(lap);
-    this.summaryMessageIdRepository.deleteByLap(clanData.categoryId, lap);
+    await this.messageCoordinator.cleanupGeneratedNextLapState(clanData, context, request);
   }
 
   private ensureBossStatusRowsForExistingLap(clanData: ClanData, lap: number): void {
@@ -1042,7 +2016,6 @@ export class AttackService {
   }
 
   private async consumeCarryOver(
-    clanData: ClanData,
     attackStatus: AttackStatus,
     request: AttackFinishRequest | DefeatBossRequest,
   ): Promise<boolean> {
@@ -1055,119 +2028,9 @@ export class AttackService {
       return false;
     }
 
-    let carryOverIndex = 0;
-    if (carryOverList.length > 1) {
-      if (request.selectCarryOver) {
-        await request.responseChannel.send({
-          content: formatCarryOverSelectionPrompt(request.member.id),
-        });
-
-        const selected = await request.selectCarryOver({
-          member: request.member,
-          carryOverList,
-          responseChannel: request.responseChannel,
-        });
-
-        if (selected === null) {
-          attackStatus.playerData.log.pop();
-          return false;
-        }
-
-        carryOverIndex = selected;
-      } else {
-        this.logger.warn("Multiple carryovers exist but no selector was provided; defaulting to first", {
-          categoryId: clanData.categoryId,
-          userId: attackStatus.playerData.userId,
-          carryOverCount: carryOverList.length,
-        });
-      }
-    }
-
-    if (carryOverIndex < 0 || carryOverIndex >= carryOverList.length) {
-      attackStatus.playerData.log.pop();
-      await request.responseChannel.send({
-        content: USER_MESSAGES.errors.commandExecutionFailed,
-      });
-      return false;
-    }
-
-    carryOverList.splice(carryOverIndex, 1);
+    carryOverList.sort(compareCarryOversOldestFirst);
+    carryOverList.splice(0, 1);
     return true;
-  }
-
-  private cleanupReserveByAttack(
-    clanData: ClanData,
-    attackStatus: AttackStatus,
-    bossIndex: number,
-  ): ReserveCleanupResult {
-    const removedByBossIndex = new Map<number, ReserveData[]>();
-    const touchedBossIndexes = new Set<number>();
-
-    const currentReserveList = [...(clanData.reserveList[bossIndex] ?? [])];
-    let matchingReserveIndex = -1;
-    for (let index = 0; index < currentReserveList.length; index += 1) {
-      const reserveData = currentReserveList[index]!;
-      if (
-        reserveData.carryOver === attackStatus.carryOver &&
-        reserveData.attackType === attackStatus.attackType &&
-        reserveData.playerData.userId === attackStatus.playerData.userId
-      ) {
-        matchingReserveIndex = index;
-      }
-    }
-
-    if (matchingReserveIndex !== -1) {
-      const removedReserve = currentReserveList.splice(matchingReserveIndex, 1);
-      clanData.reserveList[bossIndex] = currentReserveList;
-      removedByBossIndex.set(bossIndex, removedReserve);
-      touchedBossIndexes.add(bossIndex);
-    }
-
-    const playerData = attackStatus.playerData;
-    const attackCompleted = playerData.magicAttack + playerData.physicsAttack === 3;
-    const carryOverCompleted = playerData.carryOverList.length === 0;
-
-    if (!attackCompleted && !carryOverCompleted) {
-      return {
-        touchedBossIndexes,
-        removedByBossIndex,
-      };
-    }
-
-    for (let targetBossIndex = 0; targetBossIndex < clanData.reserveList.length; targetBossIndex += 1) {
-      const reserveList = [...(clanData.reserveList[targetBossIndex] ?? [])];
-      const keptReserveList: ReserveData[] = [];
-      const additionallyRemoved: ReserveData[] = [];
-
-      for (const reserveData of reserveList) {
-        const sameUser = reserveData.playerData.userId === playerData.userId;
-        const shouldRemove =
-          (attackCompleted && sameUser && !reserveData.carryOver) ||
-          (carryOverCompleted && sameUser && reserveData.carryOver);
-
-        if (shouldRemove) {
-          additionallyRemoved.push(reserveData);
-        } else {
-          keptReserveList.push(reserveData);
-        }
-      }
-
-      if (additionallyRemoved.length === 0) {
-        continue;
-      }
-
-      clanData.reserveList[targetBossIndex] = keptReserveList;
-      removedByBossIndex.set(targetBossIndex, [
-        ...(removedByBossIndex.get(targetBossIndex) ?? []),
-        ...additionallyRemoved,
-      ]);
-      touchedBossIndexes.add(targetBossIndex);
-    }
-
-    return {
-      touchedBossIndexes,
-      removedByBossIndex,
-    };
   }
 
   private ensureProgressRow(clanData: ClanData, lap: number): boolean {
@@ -1194,111 +2057,7 @@ export class AttackService {
     bossIndex: number,
     request: AttackRenderContext,
   ): Promise<void> {
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    displayNamesByUserId.set(request.member.id, request.member.displayName);
-
-    const embed = renderProgressEmbed({
-      clanData,
-      lap,
-      bossIndex,
-      displayNamesByUserId,
-    });
-
-    await this.updateProgressMessage(clanData, lap, bossIndex, embed, request);
-    await this.updateSummaryMessage(clanData, lap, bossIndex, embed, request);
-  }
-
-  private async updateProgressMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    embed: EmbedBuilder,
-    request: AttackRenderContext,
-  ): Promise<void> {
-    const progressMessageId = clanData.progressMessageIdsByLap.get(lap)?.[bossIndex];
-    if (!progressMessageId) {
-      await this.ensureProgressMessage(clanData, lap, bossIndex, request);
-      return;
-    }
-
-    let bossChannel: AttackTextChannel;
-    try {
-      bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-    } catch (error) {
-      this.logger.warn("Failed to resolve boss channel for progress redraw", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const result = await this.editMessageWithRetry(
-      bossChannel,
-      progressMessageId,
-      embed,
-      "progress",
-      clanData.categoryId,
-      lap,
-      bossIndex,
-    );
-
-    if (!result.updated && result.missing) {
-      await this.ensureProgressMessage(clanData, lap, bossIndex, request);
-    }
-  }
-
-  private async updateSummaryMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    embed: EmbedBuilder,
-    request: AttackRenderContext,
-  ): Promise<void> {
-    const summaryMessageIds = clanData.summaryMessageIdsByLap.get(lap);
-    if (!summaryMessageIds) {
-      await this.ensureSummaryMessages(
-        clanData,
-        lap,
-        cloneDisplayNamesMap(request.displayNamesByUserId),
-        request,
-      );
-      return;
-    }
-
-    const summaryMessageId = summaryMessageIds[bossIndex];
-    if (!summaryMessageId) {
-      await this.createSummaryMessage(clanData, lap, bossIndex, embed, request, true);
-      return;
-    }
-
-    let summaryChannel: AttackTextChannel;
-    try {
-      summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve summary channel for redraw", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const result = await this.editMessageWithRetry(
-      summaryChannel,
-      summaryMessageId,
-      embed,
-      "summary",
-      clanData.categoryId,
-      lap,
-      bossIndex,
-    );
-
-    if (!result.updated && result.missing) {
-      await this.createSummaryMessage(clanData, lap, bossIndex, embed, request, true);
-    }
+    await this.messageCoordinator.updateProgressMessages(clanData, lap, bossIndex, request);
   }
 
   private async ensureProgressMessage(
@@ -1307,203 +2066,55 @@ export class AttackService {
     bossIndex: number,
     request: AttackRenderContext,
   ): Promise<void> {
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    displayNamesByUserId.set(request.member.id, request.member.displayName);
-
-    let bossChannel: AttackTextChannel;
-    try {
-      bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-    } catch (error) {
-      this.logger.warn("Failed to resolve boss channel for progress creation", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const progressEmbed = renderProgressEmbed({
-      clanData,
-      lap,
-      bossIndex,
-      displayNamesByUserId,
-    });
-
-    try {
-      const progressMessage = await bossChannel.sendMessage({
-        embeds: [progressEmbed],
-      });
-
-      for (const emoji of PROGRESS_REACTIONS) {
-        await progressMessage.addReaction(emoji);
-      }
-
-      const hadProgressRow = clanData.progressMessageIdsByLap.has(lap);
-      const progressMessageIds = clanData.progressMessageIdsByLap.get(lap) ?? createBossSlots();
-      progressMessageIds[bossIndex] = progressMessage.id;
-      clanData.progressMessageIdsByLap.set(lap, progressMessageIds);
-
-      runInTransaction(this.options.database, () => {
-        if (hadProgressRow) {
-          this.progressMessageIdRepository.update(clanData.categoryId, lap, progressMessageIds);
-        } else {
-          this.progressMessageIdRepository.insert(clanData.categoryId, lap, progressMessageIds);
-        }
-      });
-
-      await this.ensureSummaryMessages(clanData, lap, displayNamesByUserId, request);
-    } catch (error) {
-      this.logger.warn("Failed to create progress message", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-    }
-  }
-
-  private async ensureSummaryMessages(
-    clanData: ClanData,
-    lap: number,
-    displayNamesByUserId: ReadonlyMap<string, string>,
-    request: AttackRenderContext,
-  ): Promise<void> {
-    if (clanData.summaryMessageIdsByLap.has(lap)) {
-      return;
-    }
-
-    let summaryChannel: AttackTextChannel;
-    try {
-      summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve summary channel for creation", {
-        categoryId: clanData.categoryId,
-        lap,
-        error,
-      });
-      return;
-    }
-
-    const summaryMessageIds = createBossSlots();
-    for (let currentBossIndex = 0; currentBossIndex < clanData.bossChannelIds.length; currentBossIndex += 1) {
-      const summaryEmbed = renderProgressEmbed({
-        clanData,
-        lap,
-        bossIndex: currentBossIndex,
-        displayNamesByUserId,
-      });
-
-      try {
-        const summaryMessage = await summaryChannel.sendMessage({
-          embeds: [summaryEmbed],
-        });
-        summaryMessageIds[currentBossIndex] = summaryMessage.id;
-      } catch (error) {
-        this.logger.warn("Failed to create summary mirror message", {
-          categoryId: clanData.categoryId,
-          lap,
-          bossIndex: currentBossIndex,
-          error,
-        });
-      }
-    }
-
-    clanData.summaryMessageIdsByLap.set(lap, summaryMessageIds);
-    runInTransaction(this.options.database, () => {
-      this.summaryMessageIdRepository.insert(clanData.categoryId, lap, summaryMessageIds);
-    });
-  }
-
-  private async createSummaryMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    embed: EmbedBuilder,
-    request: AttackRenderContext,
-    updateExistingRow: boolean,
-  ): Promise<void> {
-    let summaryChannel: AttackTextChannel;
-    try {
-      summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve summary channel for single-message creation", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    try {
-      const summaryMessage = await summaryChannel.sendMessage({
-        embeds: [embed],
-      });
-
-      const hadSummaryRow = clanData.summaryMessageIdsByLap.has(lap);
-      const summaryMessageIds = clanData.summaryMessageIdsByLap.get(lap) ?? createBossSlots();
-      summaryMessageIds[bossIndex] = summaryMessage.id;
-      clanData.summaryMessageIdsByLap.set(lap, summaryMessageIds);
-
-      runInTransaction(this.options.database, () => {
-        if (updateExistingRow || hadSummaryRow) {
-          this.summaryMessageIdRepository.update(clanData.categoryId, lap, summaryMessageIds);
-        } else {
-          this.summaryMessageIdRepository.insert(clanData.categoryId, lap, summaryMessageIds);
-        }
-      });
-    } catch (error) {
-      this.logger.warn("Failed to create summary message", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-    }
+    await this.messageCoordinator.ensureProgressMessage(clanData, lap, bossIndex, request);
   }
 
   private async updateRemainAttackMessage(
     clanData: ClanData,
     request: AttackRenderContext,
   ): Promise<void> {
-    if (!clanData.remainAttackMessageId) {
-      await this.createCurrentRemainAttackMessage(clanData, request);
+    await this.messageCoordinator.updateRemainAttackMessage(clanData, request);
+  }
+
+  private async updateSummaryMessage(
+    clanData: ClanData,
+    request: AttackRenderContext,
+  ): Promise<void> {
+    await this.messageCoordinator.updateSummaryMessage(clanData, request);
+  }
+
+  private async syncNonProgressMessages(
+    clanData: ClanData,
+    request: AttackRenderContext,
+    options: {
+      updateSummary?: boolean;
+      updateRemainAttack?: boolean;
+    },
+  ): Promise<void> {
+    const job: DeferredNonProgressSyncJob<AttackRenderContext> = {
+      request,
+      updateSummary: options.updateSummary ?? false,
+      updateRemainAttack: options.updateRemainAttack ?? false,
+    };
+
+    if (!request.deferNonProgressMessageUpdates) {
+      await this.runNonProgressMessageUpdates(clanData, job);
       return;
     }
 
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    displayNamesByUserId.set(request.member.id, request.member.displayName);
+    this.deferredNonProgressMessageSyncQueue.schedule(clanData.categoryId, job);
+  }
 
-    const embed = buildRemainAttackEmbed(clanData, displayNamesByUserId, this.clock);
-
-    let remainAttackChannel: AttackTextChannel;
-    try {
-      remainAttackChannel = await request.discordGateway.getTextChannel(
-        clanData.remainAttackChannelId,
-      );
-    } catch (error) {
-      this.logger.warn("Failed to resolve remain-attack channel for redraw", {
-        categoryId: clanData.categoryId,
-        error,
-      });
-      return;
+  private async runNonProgressMessageUpdates(
+    clanData: ClanData,
+    job: DeferredNonProgressSyncJob<AttackRenderContext>,
+  ): Promise<void> {
+    if (job.updateSummary) {
+      await this.updateSummaryMessage(clanData, job.request);
     }
 
-    const result = await this.editMessageWithRetry(
-      remainAttackChannel,
-      clanData.remainAttackMessageId,
-      embed,
-      "remain-attack",
-      clanData.categoryId,
-    );
-
-    if (!result.updated && result.missing) {
-      clanData.remainAttackMessageId = null;
-      runInTransaction(this.options.database, () => {
-        this.clanRepository.update(clanData);
-      });
-      await this.createCurrentRemainAttackMessage(clanData, request);
+    if (job.updateRemainAttack) {
+      await this.updateRemainAttackMessage(clanData, job.request);
     }
   }
 
@@ -1512,155 +2123,22 @@ export class AttackService {
     dayGuardResult: ClanBattleDayGuardResult | null,
     request: AttackRenderContext,
   ): Promise<void> {
-    if (
-      !clanData ||
-      (!dayGuardResult?.shouldCreateRemainAttackMessage && clanData.remainAttackMessageId)
-    ) {
-      return;
-    }
-
-    await this.createCurrentRemainAttackMessage(clanData, request);
+    await this.messageCoordinator.ensureCurrentRemainAttackMessage(
+      clanData,
+      dayGuardResult,
+      request,
+    );
   }
 
-  private async createCurrentRemainAttackMessage(
-    clanData: ClanData,
+  private async ensureCurrentSummaryMessage(
+    clanData: ClanData | undefined,
+    dayGuardResult: ClanBattleDayGuardResult | null,
     request: AttackRenderContext,
   ): Promise<void> {
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    displayNamesByUserId.set(request.member.id, request.member.displayName);
-
-    let remainAttackChannel: AttackTextChannel;
-    try {
-      remainAttackChannel = await request.discordGateway.getTextChannel(clanData.remainAttackChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve remain-attack channel for current message creation", {
-        categoryId: clanData.categoryId,
-        error,
-      });
-      return;
-    }
-
-    try {
-      const remainAttackMessage = await sendRemainAttackMessage(
-        remainAttackChannel,
-        clanData,
-        displayNamesByUserId,
-        this.clock,
-      );
-      clanData.remainAttackMessageId = remainAttackMessage.messageId;
-      if (!remainAttackMessage.taskKillReactionAdded) {
-        this.logger.warn("Failed to add task-kill reaction to remain-attack message", {
-          categoryId: clanData.categoryId,
-          messageId: remainAttackMessage.messageId,
-          error: remainAttackMessage.taskKillReactionError,
-        });
-      }
-    } catch (error) {
-      this.logger.warn("Failed to create remain-attack message", {
-        categoryId: clanData.categoryId,
-        error,
-      });
-      return;
-    }
-
-    runInTransaction(this.options.database, () => {
-      this.clanRepository.update(clanData);
-    });
-  }
-
-  private async editMessageWithRetry(
-    channel: AttackTextChannel,
-    messageId: string,
-    embed: EmbedBuilder,
-    kind: "progress" | "summary" | "remain-attack",
-    categoryId: string,
-    lap?: number,
-    bossIndex?: number,
-  ): Promise<MessageUpdateResult> {
-    let lastError: unknown;
-    let missing = false;
-
-    for (let attempt = 0; attempt < DEFAULT_REDRAW_RETRY_COUNT; attempt += 1) {
-      try {
-        const message = await channel.fetchMessage(messageId);
-        await message.edit({
-          embeds: [embed],
-        });
-        return {
-          updated: true,
-          missing: false,
-        };
-      } catch (error) {
-        lastError = error;
-        missing = isMessageMissingError(error);
-
-        if (attempt < DEFAULT_REDRAW_RETRY_COUNT - 1) {
-          await sleep(this.redrawRetryDelayMs);
-        }
-      }
-    }
-
-    this.logger.warn("Failed to redraw Discord message", {
-      categoryId,
-      kind,
-      lap,
-      bossIndex,
-      messageId,
-      missing,
-      error: lastError,
-    });
-
-    return {
-      updated: false,
-      missing,
-    };
-  }
-
-  private async deleteMessageWithRetry(
-    channel: AttackTextChannel,
-    messageId: string,
-    kind: "progress" | "summary",
-    categoryId: string,
-    lap: number,
-    bossIndex: number,
-  ): Promise<void> {
-    let lastError: unknown;
-    let missing = false;
-
-    for (let attempt = 0; attempt < DEFAULT_REDRAW_RETRY_COUNT; attempt += 1) {
-      try {
-        const message = await channel.fetchMessage(messageId);
-        if (typeof message.delete !== "function") {
-          this.logger.warn("Fetched Discord message does not support deletion", {
-            categoryId,
-            kind,
-            lap,
-            bossIndex,
-            messageId,
-          });
-          return;
-        }
-
-        await message.delete();
-        return;
-      } catch (error) {
-        lastError = error;
-        missing = isMessageMissingError(error);
-
-        if (attempt < DEFAULT_REDRAW_RETRY_COUNT - 1) {
-          await sleep(this.redrawRetryDelayMs);
-        }
-      }
-    }
-
-    this.logger.warn("Failed to delete Discord message", {
-      categoryId,
-      kind,
-      lap,
-      bossIndex,
-      messageId,
-      missing,
-      error: lastError,
-    });
+    await this.messageCoordinator.ensureCurrentSummaryMessage(
+      clanData,
+      dayGuardResult,
+      request,
+    );
   }
 }

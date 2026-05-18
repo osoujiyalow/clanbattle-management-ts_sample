@@ -1,8 +1,8 @@
 {
-  "name": "clanbattle-management-ts_sample",
+  "name": "clanbattle-management-ts-sample",
   "version": "0.1.0",
   "private": true,
-  "description": "Minimal TypeScript sample for ClanBattle management",
+  "description": "Public TypeScript sample for ClanBattle management",
   "type": "module",
   "main": "dist/index.js",
   "engines": {
@@ -13,18 +13,29 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:integration": "vitest run tests/integration",
+    "test:parity": "vitest run tests/parity",
+    "rehearse:staging-migration": "tsx src/tools/staging-migration-rehearsal.ts"
   },
   "dependencies": {
     "better-sqlite3": "12.6.2",
     "dayjs": "1.11.19",
-    "discord.js": "14.25.1",
+    "discord.js": "14.26.4",
     "zod": "4.3.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "24.10.1",
+    "@typescript-eslint/eslint-plugin": "8.46.3",
+    "@typescript-eslint/parser": "8.46.3",
+    "dependency-cruiser": "17.1.0",
+    "eslint": "9.38.0",
+    "eslint-plugin-boundaries": "6.0.2",
     "tsx": "4.21.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.0.18"
   }
 }

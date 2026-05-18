@@ -1,10 +1,14 @@
-import { AttackType } from "./attack-type.js";
+import {
+  AttackType,
+  normalizeAttackType,
+  type AttackType as AttackTypeValue,
+} from "./attack-type.js";
 import type { PlayerData } from "./player-data.js";
 import { calcCarryOverTime } from "./util/carry-over.js";
 
 export interface AttackStatusParams {
   playerData: PlayerData;
-  attackType: AttackType;
+  attackType: AttackTypeValue;
   carryOver: boolean;
   damage?: number;
   memo?: string;
@@ -17,7 +21,7 @@ export interface AttackStatusRecord {
   damage: number;
   memo: string;
   attacked: boolean;
-  attackType: AttackType;
+  attackType: AttackTypeValue;
   carryOver: boolean;
   created: Date;
 }
@@ -35,7 +39,7 @@ export class AttackStatus {
   damage: number;
   memo: string;
   attacked: boolean;
-  readonly attackType: AttackType;
+  attackType: AttackTypeValue;
   carryOver: boolean;
   created: Date;
 
@@ -44,7 +48,7 @@ export class AttackStatus {
     this.damage = params.damage ?? 0;
     this.memo = params.memo ?? "";
     this.attacked = params.attacked ?? false;
-    this.attackType = params.attackType;
+    this.attackType = normalizeAttackType(params.attackType) ?? params.attackType;
     this.carryOver = params.carryOver;
     this.created = params.created ? cloneDate(params.created) : new Date();
   }
@@ -62,31 +66,32 @@ export class AttackStatus {
   }
 
   createAttackStatusTxt(displayName: string, currentHp: number): string {
-    let text = `${this.attackType}${formatDamage(this.damage)}万 ${this.memo} `;
-
-    if (this.carryOver) {
-      text += "持ち越し";
+    const segments = [this.attackType, `${formatDamage(this.damage)}万`];
+    if (this.memo) {
+      segments.push(this.memo);
     }
+
+    let text = segments.join(" ");
 
     if (0 < currentHp && currentHp < this.damage) {
       text += ` 持ち越し発生: ${calcCarryOverTime(currentHp, this.damage)}秒`;
     }
 
-    text += this.playerData.createSimpleTxt(displayName);
+    text += this.playerData.createCompactProgressTxt(displayName);
     return text;
   }
 
   updateAttackLog(): void {
-    if (this.playerData.physicsAttack + this.playerData.magicAttack >= 3) {
+    if (this.playerData.battleAttackCount >= 3) {
       return;
     }
 
-    if (this.attackType === AttackType.MAGIC) {
-      this.playerData.magicAttack += 1;
-      return;
-    }
+    this.playerData.incrementBattleAttackCount();
+  }
 
-    this.playerData.physicsAttack += 1;
+  setAttackType(attackType: AttackTypeValue): void {
+    this.attackType = normalizeAttackType(attackType) ?? attackType;
+    this.carryOver = this.attackType === AttackType.CARRYOVER;
   }
 
   toRecord(): AttackStatusRecord {

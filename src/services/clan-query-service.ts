@@ -1,18 +1,35 @@
-import type { EmbedBuilder } from "discord.js";
+import { randomUUID } from "node:crypto";
 
-import { EMOJIS } from "../constants/emojis.js";
+import type {
+  ActionRowBuilder,
+  EmbedBuilder,
+  MessageActionRowComponentBuilder,
+} from "discord.js";
+
+import { AttackEntryKind, AttackEntryStatus } from "../domain/attack-entry.js";
+import type { AttackEntry } from "../domain/attack-entry.js";
 import { USER_MESSAGES } from "../constants/messages.js";
 import type { ClanData } from "../domain/clan-data.js";
+import { CarryOver } from "../domain/player-data.js";
+import type { PlayerData } from "../domain/player-data.js";
+import { PlayerResourceState } from "../domain/player-resource-state.js";
+import { ResourceAdjustment, ResourceAdjustmentType } from "../domain/resource-adjustment.js";
+import { AttackType } from "../domain/attack-type.js";
 import { calcCarryOverTime } from "../domain/util/carry-over.js";
-import { renderProgressEmbed } from "../renderers/progress-renderer.js";
+import { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import { AttackStatusRepository } from "../repositories/sqlite/attack-status-repository.js";
 import {
   ProgressMessageIdRepository,
   SummaryMessageIdRepository,
 } from "../repositories/sqlite/boss-message-id-repository.js";
 import { BossStatusRepository } from "../repositories/sqlite/boss-status-repository.js";
+import { CarryOverRepository } from "../repositories/sqlite/carry-over-repository.js";
 import { ClanRepository } from "../repositories/sqlite/clan-repository.js";
 import { runInTransaction, type SqliteDatabase } from "../repositories/sqlite/db.js";
+import { OperationLogRepository } from "../repositories/sqlite/operation-log-repository.js";
+import { PlayerRepository } from "../repositories/sqlite/player-repository.js";
+import { PlayerResourceStateRepository } from "../repositories/sqlite/player-resource-state-repository.js";
+import { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
 import type { ClanBattleDayGuardResult } from "../shared/date-guard.js";
 import type { Logger } from "../shared/logger.js";
 import {
@@ -21,8 +38,14 @@ import {
   tokenizeNumericInput,
 } from "../shared/numeric-tokenizer.js";
 import { type Clock, systemClock } from "../shared/time.js";
-import { buildRemainAttackEmbed, sendRemainAttackMessage } from "./remain-attack-message.js";
+import { DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS } from "./discord-message-retry.js";
+import { ClanQueryMessageCoordinator } from "./clan-query-message-coordinator.js";
 import type { RuntimeStateService } from "./runtime-state-service.js";
+import {
+  createSummaryOverviewMessageIds,
+  findCurrentSummaryOverviewMessage,
+  resolveSummaryOverviewStorageLap,
+} from "./summary-overview-tracking.js";
 
 const NOOP_LOGGER: Logger = {
   debug() {},
@@ -31,47 +54,12 @@ const NOOP_LOGGER: Logger = {
   error() {},
 };
 
-const DEFAULT_REDRAW_RETRY_COUNT = 3;
-const DEFAULT_REDRAW_RETRY_DELAY_MS = 10;
-const PROGRESS_REACTIONS = [
-  EMOJIS.physics,
-  EMOJIS.magic,
-  EMOJIS.carryover,
-  EMOJIS.attack,
-  EMOJIS.lastAttack,
-  EMOJIS.reverse,
-] as const;
-
 function createBossSlots(): [string | null, string | null, string | null, string | null, string | null] {
   return [null, null, null, null, null];
 }
 
-function cloneDisplayNamesMap(
-  displayNamesByUserId: ReadonlyMap<string, string> | undefined,
-): Map<string, string> {
-  return new Map(displayNamesByUserId ?? []);
-}
-
-function formatNumber(value: number): string {
-  return value.toLocaleString("en-US");
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-function isMessageMissingError(error: unknown): boolean {
-  if (typeof error === "object" && error !== null && "code" in error && error.code === 10008) {
-    return true;
-  }
-
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  return error.message.includes("Unknown message id") || error.message.includes("Unknown Message");
+function formatCarryOverAttackLine(index: number, damage: number, label: "削り" | "討伐"): string {
+  return `${index}人目 ${damage} ${label}`;
 }
 
 export interface ClanQueryResponseChannel {
@@ -81,11 +69,15 @@ export interface ClanQueryResponseChannel {
 export interface ClanQuerySendPayload {
   content?: string;
   embeds?: readonly EmbedBuilder[];
+  components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
 }
 
 export interface ClanQueryEditableMessage {
   readonly id: string;
-  edit(payload: { embeds?: readonly EmbedBuilder[] }): Promise<void>;
+  edit(payload: {
+    embeds?: readonly EmbedBuilder[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
+  }): Promise<void>;
   delete(): Promise<void>;
 }
 
@@ -121,12 +113,32 @@ export interface CalcCarryOverRequest {
   responseChannel: ClanQueryResponseChannel;
 }
 
+export interface ClanQueryMember {
+  id: string;
+  displayName: string;
+}
+
+export interface AdjustRemainAttackCountRequest extends ClanQueryRenderContext {
+  categoryId: string;
+  channelId: string;
+  actor: ClanQueryMember;
+  member: ClanQueryMember;
+  type: ResourceAdjustmentType;
+  remaining: number;
+}
+
 export interface ClanQueryServiceOptions {
   database: SqliteDatabase;
   runtimeStateService: RuntimeStateService;
   clanRepository?: ClanRepository;
+  playerRepository?: PlayerRepository;
+  attackEntryRepository?: AttackEntryRepository;
+  playerResourceStateRepository?: PlayerResourceStateRepository;
+  operationLogRepository?: OperationLogRepository;
+  resourceAdjustmentRepository?: ResourceAdjustmentRepository;
   attackStatusRepository?: AttackStatusRepository;
   bossStatusRepository?: BossStatusRepository;
+  carryOverRepository?: CarryOverRepository;
   progressMessageIdRepository?: ProgressMessageIdRepository;
   summaryMessageIdRepository?: SummaryMessageIdRepository;
   clock?: Clock;
@@ -136,27 +148,52 @@ export interface ClanQueryServiceOptions {
 
 export class ClanQueryService {
   private readonly clanRepository: ClanRepository;
+  private readonly playerRepository: PlayerRepository;
+  private readonly attackEntryRepository: AttackEntryRepository;
+  private readonly playerResourceStateRepository: PlayerResourceStateRepository;
+  private readonly operationLogRepository: OperationLogRepository;
+  private readonly resourceAdjustmentRepository: ResourceAdjustmentRepository;
   private readonly attackStatusRepository: AttackStatusRepository;
   private readonly bossStatusRepository: BossStatusRepository;
+  private readonly carryOverRepository: CarryOverRepository;
   private readonly progressMessageIdRepository: ProgressMessageIdRepository;
   private readonly summaryMessageIdRepository: SummaryMessageIdRepository;
   private readonly clock: Clock;
-  private readonly logger: Logger;
-  private readonly redrawRetryDelayMs: number;
+  private readonly messageCoordinator: ClanQueryMessageCoordinator;
 
   constructor(private readonly options: ClanQueryServiceOptions) {
     this.clanRepository = options.clanRepository ?? new ClanRepository(options.database);
+    this.playerRepository = options.playerRepository ?? new PlayerRepository(options.database);
+    this.attackEntryRepository =
+      options.attackEntryRepository ?? new AttackEntryRepository(options.database);
+    this.playerResourceStateRepository =
+      options.playerResourceStateRepository ?? new PlayerResourceStateRepository(options.database);
+    this.operationLogRepository =
+      options.operationLogRepository ?? new OperationLogRepository(options.database);
+    this.resourceAdjustmentRepository =
+      options.resourceAdjustmentRepository ?? new ResourceAdjustmentRepository(options.database);
     this.attackStatusRepository =
       options.attackStatusRepository ?? new AttackStatusRepository(options.database);
     this.bossStatusRepository =
       options.bossStatusRepository ?? new BossStatusRepository(options.database);
+    this.carryOverRepository =
+      options.carryOverRepository ?? new CarryOverRepository(options.database);
     this.progressMessageIdRepository =
       options.progressMessageIdRepository ?? new ProgressMessageIdRepository(options.database);
     this.summaryMessageIdRepository =
       options.summaryMessageIdRepository ?? new SummaryMessageIdRepository(options.database);
     this.clock = options.clock ?? systemClock;
-    this.logger = options.logger ?? NOOP_LOGGER;
-    this.redrawRetryDelayMs = options.redrawRetryDelayMs ?? DEFAULT_REDRAW_RETRY_DELAY_MS;
+    const logger = options.logger ?? NOOP_LOGGER;
+    const redrawRetryDelayMs =
+      options.redrawRetryDelayMs ?? DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS;
+    this.messageCoordinator = new ClanQueryMessageCoordinator({
+      clanRepository: this.clanRepository,
+      progressMessageIdRepository: this.progressMessageIdRepository,
+      summaryMessageIdRepository: this.summaryMessageIdRepository,
+      clock: this.clock,
+      logger,
+      redrawRetryDelayMs,
+    });
   }
 
   async setLap(request: SetLapRequest): Promise<boolean> {
@@ -167,6 +204,7 @@ export class ClanQueryService {
 
       const clanData = this.options.runtimeStateService.get(request.categoryId);
       await this.ensureCurrentRemainAttackMessage(clanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(clanData, dayGuardResult, request);
       if (!clanData) {
         await request.responseChannel.send({
           content: USER_MESSAGES.errors.categoryRequired,
@@ -241,9 +279,9 @@ export class ClanQueryService {
     const damages = parsedNumbers.slice(1);
     let remainHp = bossHp;
     let killed = false;
-    let killerIndex = 0;
     let killerDamage = 0;
     let hpBeforeKill = 0;
+    const attackLines: string[] = [];
 
     for (let index = 0; index < damages.length; index += 1) {
       const damage = damages[index]!;
@@ -251,51 +289,119 @@ export class ClanQueryService {
       const afterHit = remainHp - damage;
       if (afterHit <= 0) {
         killed = true;
-        killerIndex = index + 1;
         killerDamage = damage;
         hpBeforeKill = hpBeforeHit;
-        remainHp = afterHit;
+        attackLines.push(formatCarryOverAttackLine(index + 1, damage, "討伐"));
         break;
       }
+      attackLines.push(formatCarryOverAttackLine(index + 1, damage, "削り"));
       remainHp = afterHit;
     }
 
     let content: string;
     if (!killed) {
-      content = [
-        USER_MESSAGES.calcCot.notKilledPrefix,
-        `\u30dc\u30b9HP: ${formatNumber(bossHp)}`,
-        `\u5165\u529b\u4eba\u6570: ${damages.length}\u4eba`,
-        `\u30c0\u30e1\u30fc\u30b8\u5408\u8a08: ${formatNumber(damages.reduce((sum, damage) => sum + damage, 0))}`,
-        `\u6b8bHP: ${formatNumber(remainHp)}`,
-      ].join("\n");
+      content = attackLines.join("　");
       await request.responseChannel.send({ content });
       return content;
     }
 
     const cot = calcCarryOverTime(hpBeforeKill, killerDamage);
-    const overkillDamage = killerDamage - hpBeforeKill;
-    const unusedCount = damages.length - killerIndex;
-    const messageLines = [
-      USER_MESSAGES.calcCot.successHeader,
-      `\u30dc\u30b9HP(\u958b\u59cb\u6642): ${formatNumber(bossHp)}`,
-      `\u5165\u529b\u4eba\u6570: ${damages.length}\u4eba`,
-      `\u6483\u7834\u3057\u305f\u4eba: ${killerIndex}\u4eba\u76ee`,
-      `\u6483\u7834\u76f4\u524dHP: ${formatNumber(hpBeforeKill)}`,
-      `\u6483\u7834\u30c0\u30e1\u30fc\u30b8: ${formatNumber(killerDamage)}`,
-      `\u30aa\u30fc\u30d0\u30fc\u30ad\u30eb\u91cf: ${formatNumber(overkillDamage)}`,
-      `\u6301\u8d8a\u3057\u6642\u9593: ${cot}\u79d2`,
-    ];
-
-    if (unusedCount > 0) {
-      messageLines.push(
-        `\u203b ${killerIndex + 1}\u4eba\u76ee\u4ee5\u964d\u306e ${unusedCount} \u4ef6\u306e\u30c0\u30e1\u30fc\u30b8\u5165\u529b\u306f\u672a\u4f7f\u7528\u3067\u3059\uff08${killerIndex}\u4eba\u76ee\u3067\u6483\u7834\u6e08\u307f\uff09\u3002`,
-      );
-    }
-
-    content = messageLines.join("\n");
+    content = `${attackLines.join("　")}\n持越し ${cot}秒`;
     await request.responseChannel.send({ content });
     return content;
+  }
+
+  async adjustRemainAttackCount(request: AdjustRemainAttackCountRequest): Promise<boolean> {
+    return this.options.runtimeStateService.withCategoryLock(request.categoryId, async () => {
+      const dayGuardResult = this.options.runtimeStateService.get(request.categoryId)
+        ? this.options.runtimeStateService.ensureDateUpToDateLocked(request.categoryId, this.clock)
+        : null;
+
+      const clanData = this.options.runtimeStateService.get(request.categoryId);
+      await this.ensureCurrentRemainAttackMessage(clanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(clanData, dayGuardResult, request);
+      if (!clanData) {
+        await request.responseChannel.send({
+          content: USER_MESSAGES.errors.categoryRequired,
+        });
+        return false;
+      }
+
+      const playerData = clanData.getPlayerData(request.member.id);
+      if (!playerData) {
+        await request.responseChannel.send({
+          content: `${request.member.displayName}は管理対象メンバーに含まれていません。`,
+        });
+        return false;
+      }
+
+      const currentState =
+        this.options.runtimeStateService.getPlayerResourceState(
+          clanData.categoryId,
+          request.member.id,
+          clanData.date,
+        ) ??
+        new PlayerResourceState({
+          categoryId: clanData.categoryId,
+          userId: request.member.id,
+          dayKey: clanData.date,
+        });
+
+      if (
+        request.type === ResourceAdjustmentType.BATTLE &&
+        currentState.battleReservedCount > 3 - request.remaining
+      ) {
+        await request.responseChannel.send({
+          content: "未確定の本戦宣言があるため、その残数にはできません。",
+        });
+        return false;
+      }
+
+      if (
+        request.type === ResourceAdjustmentType.CARRYOVER &&
+        currentState.carryReservedCount + request.remaining > 3
+      ) {
+        await request.responseChannel.send({
+          content: "未確定の持越宣言があるため、その残数にはできません。",
+        });
+        return false;
+      }
+
+      const transitionAt = new Date();
+      runInTransaction(this.options.database, () => {
+        this.resourceAdjustmentRepository.insert(
+          new ResourceAdjustment({
+            adjustmentId: randomUUID(),
+            categoryId: clanData.categoryId,
+            userId: request.member.id,
+            actorUserId: request.actor.id,
+            dayKey: clanData.date,
+            resourceType: request.type,
+            remaining: request.remaining,
+            occurredAt: transitionAt,
+          }),
+        );
+        this.options.runtimeStateService.syncProjectedStateForCategory(
+          clanData.categoryId,
+          clanData.date,
+          transitionAt,
+        );
+        this.applyProjectedStateToLegacyPlayerData(clanData, playerData);
+        this.playerRepository.update(clanData.categoryId, playerData);
+        this.carryOverRepository.replaceAll(
+          clanData.categoryId,
+          playerData.userId,
+          playerData.carryOverList,
+        );
+      });
+
+      await request.responseChannel.send({
+        content: `${request.member.displayName}の${request.type === ResourceAdjustmentType.BATTLE ? "本戦凸" : "持越凸"}残数を${request.remaining}に修正します`,
+      });
+      await this.updateRemainAttackMessage(clanData, request);
+      await this.updateSummaryMessage(clanData, request);
+      return true;
+    });
   }
 
   private async resetAllBossProgress(
@@ -303,17 +409,24 @@ export class ClanQueryService {
     lap: number,
     request: ClanQueryRenderContext,
   ): Promise<void> {
+    const preservedSummaryMessageId = this.captureCurrentSummaryMessageId(clanData);
     clanData.initializeProgressData();
+    const transitionAt = new Date();
 
     runInTransaction(this.options.database, () => {
       this.bossStatusRepository.deleteAllByCategory(clanData.categoryId);
       this.attackStatusRepository.deleteAllByCategory(clanData.categoryId);
+      this.attackEntryRepository.deleteAllByCategory(clanData.categoryId);
+      this.operationLogRepository.deleteAllByCategory(clanData.categoryId);
+      this.resourceAdjustmentRepository.deleteAllByCategory(clanData.categoryId);
+      this.playerResourceStateRepository.deleteAllByCategory(clanData.categoryId);
       this.progressMessageIdRepository.deleteAllByCategory(clanData.categoryId);
       this.summaryMessageIdRepository.deleteAllByCategory(clanData.categoryId);
     });
 
     clanData.progressMessageIdsByLap.set(lap, createBossSlots());
     clanData.initializeBossStatusData(lap);
+    this.rebindCurrentSummaryTracking(clanData, preservedSummaryMessageId);
 
     runInTransaction(this.options.database, () => {
       this.progressMessageIdRepository.insert(
@@ -322,13 +435,22 @@ export class ClanQueryService {
         clanData.progressMessageIdsByLap.get(lap)!,
       );
       this.bossStatusRepository.insertAllForLap(clanData.categoryId, clanData.bossStatusByLap.get(lap)!);
+      this.persistCurrentSummaryTracking(clanData);
     });
+    this.options.runtimeStateService.syncProjectedStateForCategory(
+      clanData.categoryId,
+      clanData.date,
+      transitionAt,
+    );
+    this.resetLegacyPlayerState(clanData);
+    this.persistPlayerState(clanData);
 
     for (let bossIndex = 0; bossIndex < clanData.bossChannelIds.length; bossIndex += 1) {
-      await this.sendNewProgressMessage(clanData, lap, bossIndex, request, true);
+      await this.sendNewProgressMessage(clanData, lap, bossIndex, request, false);
     }
 
     await this.updateRemainAttackMessage(clanData, request);
+    await this.updateSummaryMessage(clanData, request);
     this.clanRepository.update(clanData);
   }
 
@@ -338,6 +460,8 @@ export class ClanQueryService {
     bossIndex: number,
     request: ClanQueryRenderContext,
   ): Promise<void> {
+    const preservedSummaryMessageId = this.captureCurrentSummaryMessageId(clanData);
+    const transitionAt = new Date();
     let oldLap: number | null = null;
     if (clanData.progressMessageIdsByLap.size > 0) {
       try {
@@ -362,8 +486,13 @@ export class ClanQueryService {
 
     const initializedProgressRow = this.ensureProgressRow(clanData, lap);
     const initializedBossStatusLap = this.ensureBossStatusLap(clanData, lap);
+    this.removeBossStatusFromRuntime(clanData, bossIndex);
 
     runInTransaction(this.options.database, () => {
+      this.bossStatusRepository.deleteByBossIndex(clanData.categoryId, bossIndex);
+      this.attackStatusRepository.deleteByBossIndex(clanData.categoryId, bossIndex);
+      this.attackEntryRepository.deleteAllByBossIndex(clanData.categoryId, bossIndex);
+      this.operationLogRepository.deleteAllByBossIndex(clanData.categoryId, bossIndex);
       if (initializedProgressRow) {
         this.progressMessageIdRepository.insert(
           clanData.categoryId,
@@ -376,6 +505,14 @@ export class ClanQueryService {
         this.bossStatusRepository.insertAllForLap(clanData.categoryId, clanData.bossStatusByLap.get(lap)!);
       }
     });
+    this.options.runtimeStateService.syncProjectedStateForCategory(
+      clanData.categoryId,
+      clanData.date,
+      transitionAt,
+    );
+    this.trimLegacyLogsForBoss(clanData, bossIndex);
+    this.reconcileLegacyPlayerStateAfterProjectionReset(clanData);
+    this.persistPlayerState(clanData);
 
     const targetMessageId = clanData.progressMessageIdsByLap.get(lap)?.[bossIndex];
     if (targetMessageId) {
@@ -388,9 +525,151 @@ export class ClanQueryService {
       );
     }
 
-    await this.sendNewProgressMessage(clanData, lap, bossIndex, request, true);
+    this.rebindCurrentSummaryTracking(clanData, preservedSummaryMessageId);
+    runInTransaction(this.options.database, () => {
+      this.persistCurrentSummaryTracking(clanData);
+    });
+
+    await this.sendNewProgressMessage(clanData, lap, bossIndex, request, false);
     await this.updateRemainAttackMessage(clanData, request);
+    await this.updateSummaryMessage(clanData, request);
     this.clanRepository.update(clanData);
+  }
+
+  private removeBossStatusFromRuntime(clanData: ClanData, bossIndex: number): void {
+    for (const bossStatusList of clanData.bossStatusByLap.values()) {
+      const bossStatusData = bossStatusList[bossIndex];
+      if (!bossStatusData) {
+        continue;
+      }
+
+      bossStatusData.attackPlayers = [];
+      bossStatusData.beated = false;
+    }
+  }
+
+  private trimLegacyLogsForBoss(clanData: ClanData, bossIndex: number): void {
+    for (const playerData of clanData.playerDataMap.values()) {
+      playerData.log = playerData.log.filter((logData) => logData.bossIndex !== bossIndex);
+    }
+  }
+
+  private resetLegacyPlayerState(clanData: ClanData): void {
+    for (const playerData of clanData.playerDataMap.values()) {
+      playerData.initializeAttack();
+    }
+  }
+
+  private persistPlayerState(clanData: ClanData): void {
+    for (const playerData of clanData.playerDataMap.values()) {
+      this.playerRepository.update(clanData.categoryId, playerData);
+      this.carryOverRepository.replaceAll(
+        clanData.categoryId,
+        playerData.userId,
+        playerData.carryOverList,
+      );
+    }
+  }
+
+  private reconcileLegacyPlayerStateAfterProjectionReset(clanData: ClanData): void {
+    for (const playerData of clanData.playerDataMap.values()) {
+      this.applyProjectedStateToLegacyPlayerData(clanData, playerData);
+    }
+  }
+
+  private applyProjectedStateToLegacyPlayerData(clanData: ClanData, playerData: PlayerData): void {
+    const playerResourceState =
+      this.options.runtimeStateService.getPlayerResourceState(
+        clanData.categoryId,
+        playerData.userId,
+        clanData.date,
+      ) ??
+      new PlayerResourceState({
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        dayKey: clanData.date,
+      });
+    const attackEntries = this.options.runtimeStateService
+      .getAttackEntries(clanData.categoryId)
+      .filter(
+        (attackEntry) =>
+          attackEntry.userId === playerData.userId && attackEntry.dayKey === clanData.date,
+      );
+
+    playerData.battleAttackCount = playerResourceState.battleConsumedCount;
+    playerData.carryOverList = this.alignCarryOverListToRemaining(
+      this.buildBaseAvailableCarryOvers(attackEntries),
+      playerResourceState.carryAvailableCount,
+      clanData.date,
+    );
+  }
+
+  private buildBaseAvailableCarryOvers(attackEntries: readonly AttackEntry[]): CarryOver[] {
+    const committedCarryAttackCount = attackEntries.filter(
+      (attackEntry) =>
+        attackEntry.kind === AttackEntryKind.CARRYOVER &&
+        (attackEntry.status === AttackEntryStatus.DECLARED ||
+          attackEntry.status === AttackEntryStatus.FINISHED ||
+          attackEntry.status === AttackEntryStatus.DEFEATED),
+    ).length;
+    const producedCarryOvers = attackEntries
+      .filter(
+        (attackEntry) =>
+          attackEntry.kind === AttackEntryKind.BATTLE &&
+          attackEntry.status === AttackEntryStatus.DEFEATED,
+      )
+      .map(
+        (attackEntry) =>
+          new CarryOver({
+            attackType: AttackType.BATTLE,
+            bossIndex: attackEntry.bossIndex,
+            created: attackEntry.resolvedAt ?? attackEntry.declaredAt,
+          }),
+      )
+      .sort((left, right) => {
+        const createdDiff = left.created.getTime() - right.created.getTime();
+        if (createdDiff !== 0) {
+          return createdDiff;
+        }
+
+        const bossIndexDiff = left.bossIndex - right.bossIndex;
+        if (bossIndexDiff !== 0) {
+          return bossIndexDiff;
+        }
+
+        return left.attackType.localeCompare(right.attackType);
+      });
+
+    return producedCarryOvers.slice(
+      Math.min(committedCarryAttackCount, producedCarryOvers.length),
+    );
+  }
+
+  private alignCarryOverListToRemaining(
+    baseCarryOvers: readonly CarryOver[],
+    desiredCount: number,
+    dayKey: string,
+  ): CarryOver[] {
+    const alignedCarryOvers = baseCarryOvers
+      .map((carryOver) => CarryOver.fromRecord(carryOver.toRecord()))
+      .slice(0, desiredCount);
+
+    while (alignedCarryOvers.length < desiredCount) {
+      alignedCarryOvers.push(
+        new CarryOver({
+          attackType: AttackType.BATTLE,
+          bossIndex: -1,
+          created: this.createSyntheticCarryOverTimestamp(dayKey, alignedCarryOvers.length),
+        }),
+      );
+    }
+
+    return alignedCarryOvers;
+  }
+
+  private createSyntheticCarryOverTimestamp(dayKey: string, offset: number): Date {
+    const baseDate = new Date(`${dayKey}T23:50:00+09:00`);
+    return new Date(baseDate.getTime() + offset * 1_000);
   }
 
   private ensureProgressRow(clanData: ClanData, lap: number): boolean {
@@ -417,26 +696,7 @@ export class ClanQueryService {
     bossIndex: number,
     request: ClanQueryRenderContext,
   ): Promise<void> {
-    const progressMessageId = clanData.progressMessageIdsByLap.get(lap)?.[bossIndex];
-    if (!progressMessageId) {
-      return;
-    }
-
-    const bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-    try {
-      const progressMessage = await bossChannel.fetchMessage(progressMessageId);
-      await progressMessage.delete();
-    } catch (error) {
-      if (!isMessageMissingError(error)) {
-        this.logger.warn("Failed to delete progress message during lap reset", {
-          categoryId: clanData.categoryId,
-          lap,
-          bossIndex,
-          messageId: progressMessageId,
-          error,
-        });
-      }
-    }
+    await this.messageCoordinator.deleteProgressMessage(clanData, lap, bossIndex, request);
   }
 
   private async sendNewProgressMessage(
@@ -446,118 +706,27 @@ export class ClanQueryService {
     request: ClanQueryRenderContext,
     createSummaryIfMissing: boolean,
   ): Promise<string> {
-    const bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    const progressEmbed = renderProgressEmbed({
+    return this.messageCoordinator.sendNewProgressMessage(
       clanData,
       lap,
       bossIndex,
-      displayNamesByUserId,
-    });
-    const progressMessage = await bossChannel.sendMessage({
-      embeds: [progressEmbed],
-    });
-
-    for (const emoji of PROGRESS_REACTIONS) {
-      await progressMessage.addReaction(emoji);
-    }
-
-    const progressMessageIds = clanData.progressMessageIdsByLap.get(lap) ?? createBossSlots();
-    progressMessageIds[bossIndex] = progressMessage.id;
-    clanData.progressMessageIdsByLap.set(lap, progressMessageIds);
-    this.progressMessageIdRepository.update(clanData.categoryId, lap, progressMessageIds);
-
-    if (createSummaryIfMissing) {
-      await this.ensureSummaryMessages(clanData, lap, displayNamesByUserId, request);
-    }
-
-    return progressMessage.id;
-  }
-
-  private async ensureSummaryMessages(
-    clanData: ClanData,
-    lap: number,
-    displayNamesByUserId: ReadonlyMap<string, string>,
-    request: ClanQueryRenderContext,
-  ): Promise<void> {
-    if (clanData.summaryMessageIdsByLap.has(lap)) {
-      return;
-    }
-
-    const summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    const summaryMessageIds = createBossSlots();
-
-    for (let bossIndex = 0; bossIndex < clanData.bossChannelIds.length; bossIndex += 1) {
-      const summaryEmbed = renderProgressEmbed({
-        clanData,
-        lap,
-        bossIndex,
-        displayNamesByUserId,
-      });
-      const summaryMessage = await summaryChannel.sendMessage({
-        embeds: [summaryEmbed],
-      });
-      summaryMessageIds[bossIndex] = summaryMessage.id;
-    }
-
-    clanData.summaryMessageIdsByLap.set(lap, summaryMessageIds);
-    this.summaryMessageIdRepository.insert(clanData.categoryId, lap, summaryMessageIds);
+      request,
+      createSummaryIfMissing,
+    );
   }
 
   private async updateRemainAttackMessage(
     clanData: ClanData,
     request: ClanQueryRenderContext,
   ): Promise<void> {
-    if (!clanData.remainAttackMessageId) {
-      return;
-    }
-
-    const remainAttackChannel = await request.discordGateway.getTextChannel(
-      clanData.remainAttackChannelId,
-    );
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    const embed = buildRemainAttackEmbed(clanData, displayNamesByUserId, this.clock);
-
-    await this.editMessageWithRetry(
-      remainAttackChannel,
-      clanData.remainAttackMessageId,
-      embed,
-      clanData.categoryId,
-    );
+    await this.messageCoordinator.updateRemainAttackMessage(clanData, request);
   }
 
-  private async editMessageWithRetry(
-    channel: ClanQueryTextChannel,
-    messageId: string,
-    embed: EmbedBuilder,
-    categoryId: string,
+  private async updateSummaryMessage(
+    clanData: ClanData,
+    request: ClanQueryRenderContext,
   ): Promise<void> {
-    let lastError: unknown;
-    let missing = false;
-
-    for (let attempt = 0; attempt < DEFAULT_REDRAW_RETRY_COUNT; attempt += 1) {
-      try {
-        const message = await channel.fetchMessage(messageId);
-        await message.edit({
-          embeds: [embed],
-        });
-        return;
-      } catch (error) {
-        lastError = error;
-        missing = isMessageMissingError(error);
-
-        if (attempt < DEFAULT_REDRAW_RETRY_COUNT - 1) {
-          await sleep(this.redrawRetryDelayMs);
-        }
-      }
-    }
-
-    this.logger.warn("Failed to redraw remain-attack message", {
-      categoryId,
-      messageId,
-      missing,
-      error: lastError,
-    });
+    await this.messageCoordinator.updateSummaryMessage(clanData, request);
   }
 
   private async ensureCurrentRemainAttackMessage(
@@ -565,29 +734,51 @@ export class ClanQueryService {
     dayGuardResult: ClanBattleDayGuardResult | null,
     request: ClanQueryRenderContext,
   ): Promise<void> {
-    if (
-      !clanData ||
-      (!dayGuardResult?.shouldCreateRemainAttackMessage && clanData.remainAttackMessageId)
-    ) {
+    await this.messageCoordinator.ensureCurrentRemainAttackMessage(
+      clanData,
+      dayGuardResult,
+      request,
+    );
+  }
+
+  private async ensureCurrentSummaryMessage(
+    clanData: ClanData | undefined,
+    dayGuardResult: ClanBattleDayGuardResult | null,
+    request: ClanQueryRenderContext,
+  ): Promise<void> {
+    await this.messageCoordinator.ensureCurrentSummaryMessage(
+      clanData,
+      dayGuardResult,
+      request,
+    );
+  }
+
+  private captureCurrentSummaryMessageId(clanData: ClanData): string | null {
+    return findCurrentSummaryOverviewMessage(clanData)?.messageId ?? null;
+  }
+
+  private rebindCurrentSummaryTracking(clanData: ClanData, messageId: string | null): void {
+    clanData.summaryMessageIdsByLap = new Map();
+    if (!messageId) {
       return;
     }
 
-    const remainAttackChannel = await request.discordGateway.getTextChannel(clanData.remainAttackChannelId);
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    const remainAttackMessage = await sendRemainAttackMessage(
-      remainAttackChannel,
-      clanData,
-      displayNamesByUserId,
-      this.clock,
-    );
-    clanData.remainAttackMessageId = remainAttackMessage.messageId;
-    if (!remainAttackMessage.taskKillReactionAdded) {
-      this.logger.warn("Failed to add task-kill reaction to remain-attack message", {
-        categoryId: clanData.categoryId,
-        messageId: remainAttackMessage.messageId,
-        error: remainAttackMessage.taskKillReactionError,
-      });
+    const storageLap = resolveSummaryOverviewStorageLap(clanData);
+    clanData.summaryMessageIdsByLap.set(storageLap, createSummaryOverviewMessageIds(messageId));
+  }
+
+  private persistCurrentSummaryTracking(clanData: ClanData): void {
+    this.summaryMessageIdRepository.deleteAllByCategory(clanData.categoryId);
+
+    const trackedSummary = findCurrentSummaryOverviewMessage(clanData);
+    if (!trackedSummary) {
+      return;
     }
-    this.clanRepository.update(clanData);
+
+    this.summaryMessageIdRepository.insert(
+      clanData.categoryId,
+      trackedSummary.lap,
+      createSummaryOverviewMessageIds(trackedSummary.messageId),
+    );
   }
 }

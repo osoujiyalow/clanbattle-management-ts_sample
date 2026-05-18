@@ -1,0 +1,529 @@
+{
+  "schemaVersion": 1,
+  "catalogKind": "verified",
+  "capturedAt": "2026-03-08",
+  "baselineGranularity": {
+    "ui": "structural-with-text-templates",
+    "db": "table-and-invariant"
+  },
+  "cases": [
+    {
+      "id": "setup/basic",
+      "title": "Managed category bootstrap",
+      "promotionSource": "raw/setup/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:322",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:679",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1008",
+        "clanbattle-management-py_ver2/setup.sql:1"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: 2.5 Channels Created By `/setup`",
+        "docs/command-spec.md :: 2.7 Shared Emoji Contract"
+      ],
+      "input": {
+        "kind": "slash",
+        "command": "setup",
+        "args": {
+          "category_channel_name": ""
+        }
+      },
+      "expectedUi": {
+        "visibility": "public",
+        "messageSequence": [
+          "チャンネルのセットアップを実施します",
+          "セットアップが完了しました"
+        ],
+        "createdCategoryName": "凸管理",
+        "createdTextChannelsInOrder": [
+          "クラバト雑談",
+          "ボス1",
+          "ボス2",
+          "ボス3",
+          "ボス4",
+          "ボス5",
+          "進行把握板",
+          "残凸把握板",
+          "コマンド入力板",
+          "持越変換"
+        ],
+        "progressMessageReactions": [],
+        "progressMessageButtons": [
+          "⚔️ 本戦凸",
+          "☕ 持越凸",
+          "☑️ 削り",
+          "🏁 討伐",
+          "↩️ 戻る"
+        ],
+        "remainAttackMessageReactions": [
+          "💀"
+        ],
+        "summaryMirrorLap1Created": true
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "ClanData",
+          "BossStatusData",
+          "ProgressMessageIdData",
+          "SummaryMessageIdData"
+        ],
+        "expectedRowCounts": {
+          "BossStatusData": 5,
+          "ProgressMessageIdData": 1,
+          "SummaryMessageIdData": 1
+        },
+        "invariants": [
+          "ProgressMessageIdData row exists for lap=1",
+          "SummaryMessageIdData row exists for lap=1",
+          "BossStatusData rows exist for lap=1 and boss_index 0..4"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts setup integration test"
+      }
+    },
+    {
+      "id": "add/member-self",
+      "title": "Add self as managed member",
+      "promotionSource": "raw/add/member-self",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:256",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1001",
+        "clanbattle-management-py_ver2/setup.sql:21"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: 3.1 `/add`"
+      ],
+      "input": {
+        "kind": "slash",
+        "command": "add",
+        "args": {}
+      },
+      "expectedUi": {
+        "visibility": "public",
+        "messageSequence": [
+          "{count}名追加します。"
+        ],
+        "editedEmbeds": [
+          "remain_attack"
+        ]
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "PlayerData"
+        ],
+        "delta": {
+          "PlayerData": "+1 row"
+        },
+        "invariants": [
+          "Inserted row uses the invoking user_id",
+          "battle_attack_count starts at 0 while legacy counters stay backfilled",
+          "task_kill stays false-compatible"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts member integration test"
+      }
+    },
+    {
+      "id": "attack_declare/basic",
+      "title": "Declare a battle attack",
+      "promotionSource": "raw/attack_declare/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:466",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:818",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:717",
+        "clanbattle-management-py_ver2/setup.sql:39"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: `/attack_declare`"
+      ],
+      "input": {
+        "kind": "slash",
+        "command": "attack_declare",
+        "args": {
+          "member": "actor",
+          "attack_type": "本戦凸",
+          "lap": 1,
+          "boss_number": 1
+        }
+      },
+      "expectedUi": {
+        "visibility": "public",
+        "messageSequence": [
+          "{member_display_name}の凸を{attack_type}で{lap}周目{boss_number}ボスに宣言します"
+        ],
+        "editedEmbeds": [
+          "progress",
+          "summary"
+        ],
+        "progressState": "The member appears as an undealt declaration on the selected boss."
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "AttackStatus",
+          "AttackEntry",
+          "OperationLog",
+          "PlayerResourceState"
+        ],
+        "delta": {
+          "AttackStatus": "+1 row",
+          "AttackEntry": "+1 declared row",
+          "OperationLog": "+1 declare log row",
+          "PlayerResourceState": "reproject reserved and consumed counts"
+        },
+        "invariants": [
+          "attacked=false",
+          "attack_type='BATTLE'",
+          "carry_over=false",
+          "lap=1",
+          "boss_index=0",
+          "A declared AttackEntry is created for the member and boss context"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts attack declare integration test"
+      }
+    },
+    {
+      "id": "message_damage/basic",
+      "title": "Apply damage from a normal message",
+      "promotionSource": "raw/message_damage/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1095",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:717",
+        "clanbattle-management-py_ver2/setup.sql:39"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: 2.8 Shared Parsing Rules",
+        "docs/command-spec.md :: message damage flow"
+      ],
+      "input": {
+        "kind": "message",
+        "channel": "ボス1",
+        "content": "600 60s"
+      },
+      "expectedUi": {
+        "visibility": "none",
+        "messageSequence": [],
+        "editedEmbeds": [
+          "progress",
+          "summary"
+        ]
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "AttackStatus",
+          "AttackEntry",
+          "PlayerResourceState"
+        ],
+        "delta": {
+          "AttackStatus": "update existing row",
+          "AttackEntry": "update the latest declared attack snapshot",
+          "PlayerResourceState": "reproject current counts without changing consumed totals"
+        },
+        "invariants": [
+          "damage=600",
+          "memo='60s'",
+          "The newest undealt declaration on the latest lap is updated",
+          "AttackEntry mirrors the newest undealt declaration after parsing"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + parser review + ts message handler integration test"
+      }
+    },
+    {
+      "id": "attack_fin/basic",
+      "title": "Consume a declared attack",
+      "promotionSource": "raw/attack_fin/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:481",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:781",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1001",
+        "clanbattle-management-py_ver2/setup.sql:21",
+        "clanbattle-management-py_ver2/setup.sql:39"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: `/attack_fin`"
+      ],
+      "input": {
+        "kind": "slash",
+        "command": "attack_fin",
+        "args": {
+          "member": "actor",
+          "lap": 1,
+          "boss_number": 1,
+          "damage": 600
+        }
+      },
+      "expectedUi": {
+        "visibility": "public",
+        "messageSequence": [
+          "{member_display_name}の凸を{lap}周目{boss_number}ボスに消化します"
+        ],
+        "editedEmbeds": [
+          "progress",
+          "summary",
+          "remain_attack"
+        ]
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "AttackStatus",
+          "PlayerData",
+          "AttackEntry",
+          "OperationLog",
+          "PlayerResourceState"
+        ],
+        "delta": {
+          "AttackStatus": "update existing row",
+          "PlayerData": "update existing row",
+          "AttackEntry": "mark the declared entry as finished",
+          "OperationLog": "append finish log",
+          "PlayerResourceState": "reproject reserved and consumed counts"
+        },
+        "invariants": [
+          "The resolved AttackStatus becomes attacked=true",
+          "damage option overrides the stored damage when provided",
+          "PlayerData attack counters/log state are updated",
+          "The current AttackEntry becomes finished"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts attack resolution integration test"
+      }
+    },
+    {
+      "id": "defeat_boss/basic",
+      "title": "Mark boss defeated and open next lap",
+      "promotionSource": "raw/defeat_boss/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:508",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:831",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:679",
+        "clanbattle-management-py_ver2/setup.sql:52",
+        "clanbattle-management-py_ver2/setup.sql:59",
+        "clanbattle-management-py_ver2/setup.sql:68",
+        "clanbattle-management-py_ver2/setup.sql:78"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: `/defeat_boss`"
+      ],
+      "input": {
+        "kind": "slash",
+        "command": "defeat_boss",
+        "args": {
+          "member": "actor",
+          "lap": 1,
+          "boss_number": 1
+        }
+      },
+      "expectedUi": {
+        "visibility": "public",
+        "messageSequence": [
+          "{member_display_name}の凸で{boss_number}ボスを討伐します"
+        ],
+        "editedEmbeds": [
+          "progress",
+          "summary",
+          "remain_attack"
+        ],
+        "createdProgressForNextLap": true
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "AttackStatus",
+          "BossStatusData",
+          "CarryOver",
+          "PlayerData",
+          "AttackEntry",
+          "OperationLog",
+          "PlayerResourceState",
+          "ProgressMessageIdData",
+          "SummaryMessageIdData"
+        ],
+        "delta": {
+          "AttackStatus": "update existing row",
+          "BossStatusData": "update existing row",
+          "CarryOver": "optional +1 row",
+          "PlayerData": "update existing row",
+          "AttackEntry": "mark the declared entry as defeated",
+          "OperationLog": "append defeat log and any same-boss expire logs",
+          "PlayerResourceState": "reproject reserved, consumed, and carry-over counts",
+          "ProgressMessageIdData": "optional +1 row for next lap",
+          "SummaryMessageIdData": "optional +1 row for next lap"
+        },
+        "invariants": [
+          "The current boss becomes beated=true",
+          "A next-lap progress message is created when absent",
+          "Non-carry-over attacks create a CarryOver row when the member has fewer than 3 carry-overs",
+          "Summary mirrors for the next lap are created through the same progress send path"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts attack resolution integration test"
+      }
+    },
+    {
+      "id": "undo/basic",
+      "title": "Undo the latest resolved attack for a boss",
+      "promotionSource": "raw/undo/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:538",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:575",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:717",
+        "clanbattle-management-py_ver2/setup.sql:21",
+        "clanbattle-management-py_ver2/setup.sql:39",
+        "clanbattle-management-py_ver2/setup.sql:59"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: `/undo`"
+      ],
+      "input": {
+        "kind": "slash",
+        "command": "undo",
+        "args": {
+          "member": "actor",
+          "boss_number": 1
+        }
+      },
+      "expectedUi": {
+        "visibility": "public",
+        "messageSequence": [
+          "{member_display_name}の{boss_number}ボスに対する`{operation_description}`を元に戻します。"
+        ],
+        "editedEmbeds": [
+          "progress",
+          "summary",
+          "remain_attack"
+        ]
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "AttackStatus",
+          "PlayerData",
+          "AttackEntry",
+          "OperationLog",
+          "PlayerResourceState"
+        ],
+        "delta": {
+          "AttackStatus": "reverse existing row to attacked=false while keeping the declaration visible",
+          "PlayerData": "rebuild legacy counters from the projected state",
+          "AttackEntry": "revert the latest resolved entry back to declared",
+          "OperationLog": "invalidate the target resolved log and append an undo log",
+          "PlayerResourceState": "reproject reserved and consumed counts after the undo"
+        },
+        "invariants": [
+          "Boss-scoped undo targets the latest undoable operation for the member and boss",
+          "This representative case covers ATTACK undo after a resolved attack",
+          "ATTACK undo restores attacked=false while keeping the declaration visible",
+          "PlayerData battle counters are rebuilt from the current AttackEntry state"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts undo integration test"
+      }
+    },
+    {
+      "id": "bossinfo_edit/basic",
+      "title": "Bossinfo wizard save flow",
+      "promotionSource": "raw/bossinfo_edit/basic",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:395",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1399",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1536",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1612",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1708",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1738",
+        "clanbattle-management-py_ver2/setup.sql:88"
+      ],
+      "commandSpecRefs": [
+        "docs/command-spec.md :: bossinfo button/modal flow"
+      ],
+      "input": {
+        "kind": "wizard",
+        "command": "bossinfo_edit",
+        "args": {
+          "phase_count": 1,
+          "boundaries": [
+            "1 -1"
+          ],
+          "hp": [
+            [
+              5600,
+              6000,
+              7400,
+              7800,
+              15000
+            ]
+          ]
+        }
+      },
+      "expectedUi": {
+        "visibility": "ephemeral",
+        "messageSequence": [
+          "bossinfo 編集ウィザードを開始します。",
+          "境界入力 {chunk}/{total}",
+          "{boss_number}ボス HP入力 {chunk}/{total}",
+          "入力が完了しました。保存前プレビュー:",
+          "bossinfo 設定を保存しました (SQLite)。"
+        ],
+        "components": [
+          "phase-count modal",
+          "boundary modal",
+          "hp modal",
+          "confirm buttons"
+        ]
+      },
+      "expectedDb": {
+        "touchedTables": [
+          "GuildBossInfoConfig"
+        ],
+        "delta": {
+          "GuildBossInfoConfig": "upsert 1 row by guild_id"
+        },
+        "invariants": [
+          "hp_json stores the validated HP matrix",
+          "boundaries_json stores the validated boundary list",
+          "updated_by stores the editing user_id"
+        ]
+      },
+      "review": {
+        "status": "verified",
+        "uiReviewed": true,
+        "dbReviewed": true,
+        "reviewedAt": "2026-03-08",
+        "reviewMethod": "python-source + command-spec + ts bossinfo service/handler integration test"
+      }
+    }
+  ]
+}

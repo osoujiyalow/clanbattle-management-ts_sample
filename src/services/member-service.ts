@@ -1,34 +1,29 @@
-import type { EmbedBuilder } from "discord.js";
+import type {
+  ActionRowBuilder,
+  EmbedBuilder,
+  MessageActionRowComponentBuilder,
+} from "discord.js";
 
-import { EMOJIS } from "../constants/emojis.js";
 import { USER_MESSAGES } from "../constants/messages.js";
 import { type ClanData } from "../domain/clan-data.js";
 import { PlayerData } from "../domain/player-data.js";
-import { renderProgressEmbed } from "../renderers/progress-renderer.js";
+import { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import {
   ProgressMessageIdRepository,
   SummaryMessageIdRepository,
 } from "../repositories/sqlite/boss-message-id-repository.js";
 import { ClanRepository } from "../repositories/sqlite/clan-repository.js";
 import { runInTransaction, type SqliteDatabase } from "../repositories/sqlite/db.js";
+import { OperationLogRepository } from "../repositories/sqlite/operation-log-repository.js";
 import { PlayerRepository } from "../repositories/sqlite/player-repository.js";
+import { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
 import type { Logger } from "../shared/logger.js";
 import { type Clock, systemClock } from "../shared/time.js";
-import { buildRemainAttackEmbed, sendRemainAttackMessage } from "./remain-attack-message.js";
+import { DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS } from "./discord-message-retry.js";
+import { MemberServiceMessageCoordinator } from "./member-service-message-coordinator.js";
 import type { RuntimeStateService } from "./runtime-state-service.js";
 
 const REMOVE_COMPLETED_MESSAGE = "削除が完了しました。";
-const DEFAULT_REDRAW_RETRY_COUNT = 3;
-const DEFAULT_REDRAW_RETRY_DELAY_MS = 10;
-const PROGRESS_REACTIONS = [
-  EMOJIS.physics,
-  EMOJIS.magic,
-  EMOJIS.carryover,
-  EMOJIS.attack,
-  EMOJIS.lastAttack,
-  EMOJIS.reverse,
-] as const;
-
 const NOOP_LOGGER: Logger = {
   debug() {},
   info() {},
@@ -54,10 +49,6 @@ function formatRemovingMessage(count: number): string {
 
 function formatNotManagedMessage(displayName: string): string {
   return `${displayName}さんは凸管理対象ではありません。`;
-}
-
-function createBossSlots(): [string | null, string | null, string | null, string | null, string | null] {
-  return [null, null, null, null, null];
 }
 
 function cloneDisplayNamesMap(
@@ -103,24 +94,6 @@ function createMemberRenderContext(
       };
 }
 
-function isMessageMissingError(error: unknown): boolean {
-  if (typeof error === "object" && error !== null && "code" in error && error.code === 10008) {
-    return true;
-  }
-
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  return error.message.includes("Unknown message id") || error.message.includes("Unknown Message");
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
 export interface MemberIdentity {
   id: string;
   displayName: string;
@@ -136,7 +109,11 @@ export interface MemberResponseChannel {
 
 export interface MemberEditableMessage {
   readonly id: string;
-  edit(payload: { embeds?: readonly EmbedBuilder[] }): Promise<void>;
+  edit(payload: {
+    embeds?: readonly EmbedBuilder[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
+  }): Promise<void>;
+  delete?(): Promise<void>;
 }
 
 export interface MemberCreatedMessage {
@@ -147,7 +124,11 @@ export interface MemberCreatedMessage {
 export interface MemberTextChannel {
   readonly id: string;
   fetchMessage(messageId: string): Promise<MemberEditableMessage>;
-  sendMessage(payload: { content?: string; embeds?: readonly EmbedBuilder[] }): Promise<MemberCreatedMessage>;
+  sendMessage(payload: {
+    content?: string;
+    embeds?: readonly EmbedBuilder[];
+    components?: readonly ActionRowBuilder<MessageActionRowComponentBuilder>[];
+  }): Promise<MemberCreatedMessage>;
 }
 
 export interface MemberDiscordGateway {
@@ -171,11 +152,6 @@ interface MemberRenderContext {
 interface ProgressTarget {
   lap: number;
   bossIndex: number;
-}
-
-interface MessageUpdateResult {
-  updated: boolean;
-  missing: boolean;
 }
 
 export interface AddMembersRequest extends MemberServiceBaseRequest {
@@ -203,10 +179,20 @@ export interface EnsureCurrentRemainAttackMessageRequest {
   displayNamesByUserId?: ReadonlyMap<string, string>;
 }
 
+export interface ResyncCurrentMessageSurfacesRequest {
+  categoryId: string;
+  member: MemberIdentity;
+  discordGateway: MemberDiscordGateway;
+  displayNamesByUserId?: ReadonlyMap<string, string>;
+}
+
 export interface MemberServiceOptions {
   database: SqliteDatabase;
   runtimeStateService: RuntimeStateService;
+  attackEntryRepository?: AttackEntryRepository;
+  operationLogRepository?: OperationLogRepository;
   playerRepository?: PlayerRepository;
+  resourceAdjustmentRepository?: ResourceAdjustmentRepository;
   clanRepository?: ClanRepository;
   progressMessageIdRepository?: ProgressMessageIdRepository;
   summaryMessageIdRepository?: SummaryMessageIdRepository;
@@ -216,24 +202,39 @@ export interface MemberServiceOptions {
 }
 
 export class MemberService {
-  private readonly clanRepository: ClanRepository;
+  private readonly attackEntryRepository: AttackEntryRepository;
+  private readonly operationLogRepository: OperationLogRepository;
   private readonly playerRepository: PlayerRepository;
-  private readonly progressMessageIdRepository: ProgressMessageIdRepository;
-  private readonly summaryMessageIdRepository: SummaryMessageIdRepository;
+  private readonly resourceAdjustmentRepository: ResourceAdjustmentRepository;
   private readonly clock: Clock;
-  private readonly logger: Logger;
-  private readonly redrawRetryDelayMs: number;
+  private readonly messageCoordinator: MemberServiceMessageCoordinator;
 
   constructor(private readonly options: MemberServiceOptions) {
-    this.clanRepository = options.clanRepository ?? new ClanRepository(options.database);
+    this.attackEntryRepository =
+      options.attackEntryRepository ?? new AttackEntryRepository(options.database);
+    const clanRepository = options.clanRepository ?? new ClanRepository(options.database);
+    this.operationLogRepository =
+      options.operationLogRepository ?? new OperationLogRepository(options.database);
     this.playerRepository = options.playerRepository ?? new PlayerRepository(options.database);
-    this.progressMessageIdRepository =
+    this.resourceAdjustmentRepository =
+      options.resourceAdjustmentRepository ?? new ResourceAdjustmentRepository(options.database);
+    const progressMessageIdRepository =
       options.progressMessageIdRepository ?? new ProgressMessageIdRepository(options.database);
-    this.summaryMessageIdRepository =
+    const summaryMessageIdRepository =
       options.summaryMessageIdRepository ?? new SummaryMessageIdRepository(options.database);
     this.clock = options.clock ?? systemClock;
-    this.logger = options.logger ?? NOOP_LOGGER;
-    this.redrawRetryDelayMs = options.redrawRetryDelayMs ?? DEFAULT_REDRAW_RETRY_DELAY_MS;
+    const logger = options.logger ?? NOOP_LOGGER;
+    const redrawRetryDelayMs =
+      options.redrawRetryDelayMs ?? DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS;
+    this.messageCoordinator = new MemberServiceMessageCoordinator({
+      database: options.database,
+      clanRepository,
+      progressMessageIdRepository,
+      summaryMessageIdRepository,
+      clock: this.clock,
+      logger,
+      redrawRetryDelayMs,
+    });
   }
 
   async ensureCurrentRemainAttackMessage(
@@ -246,10 +247,18 @@ export class MemberService {
       }
 
       if (clanData.remainAttackMessageId) {
+        await this.ensureCurrentSummaryMessage(
+          clanData,
+          createMemberRenderContext(
+            request.member,
+            request.discordGateway,
+            request.displayNamesByUserId,
+          ),
+        );
         return clanData.remainAttackMessageId;
       }
 
-      return this.createCurrentRemainAttackMessage(
+      const remainAttackMessageId = await this.createCurrentRemainAttackMessage(
         clanData,
         createMemberRenderContext(
           request.member,
@@ -257,6 +266,40 @@ export class MemberService {
           request.displayNamesByUserId,
         ),
       );
+      await this.ensureCurrentSummaryMessage(
+        clanData,
+        createMemberRenderContext(
+          request.member,
+          request.discordGateway,
+          request.displayNamesByUserId,
+        ),
+      );
+      return remainAttackMessageId;
+    });
+  }
+
+  async resyncCurrentMessageSurfaces(
+    request: ResyncCurrentMessageSurfacesRequest,
+  ): Promise<boolean> {
+    return this.options.runtimeStateService.withCategoryLock(request.categoryId, async () => {
+      const currentClanData = this.options.runtimeStateService.get(request.categoryId);
+      if (currentClanData) {
+        this.options.runtimeStateService.ensureDateUpToDateLocked(request.categoryId, this.clock);
+      }
+
+      const clanData = this.options.runtimeStateService.get(request.categoryId);
+      if (!clanData) {
+        return false;
+      }
+
+      const renderContext = createMemberRenderContext(
+        request.member,
+        request.discordGateway,
+        request.displayNamesByUserId,
+      );
+      await this.updateRemainAttackMessage(clanData, renderContext);
+      await this.updateSummaryMessage(clanData, renderContext);
+      return true;
     });
   }
 
@@ -273,6 +316,7 @@ export class MemberService {
       ) {
         await this.createCurrentRemainAttackMessage(currentClanData, request);
       }
+      await this.ensureCurrentSummaryMessage(currentClanData, request);
 
       const refreshedClanData = this.options.runtimeStateService.get(request.categoryId);
       if (!refreshedClanData) {
@@ -335,6 +379,13 @@ export class MemberService {
           displayNamesByUserId,
         },
       );
+      await this.updateSummaryMessage(
+        refreshedClanData,
+        {
+          ...request,
+          displayNamesByUserId,
+        },
+      );
 
       return playerDataList.length;
     });
@@ -353,6 +404,7 @@ export class MemberService {
       ) {
         await this.createCurrentRemainAttackMessage(currentClanData, request);
       }
+      await this.ensureCurrentSummaryMessage(currentClanData, request);
 
       const refreshedClanData = this.options.runtimeStateService.get(request.categoryId);
       if (!refreshedClanData) {
@@ -409,12 +461,27 @@ export class MemberService {
 
       runInTransaction(this.options.database, () => {
         for (const playerData of uniquePlayerDataMap.values()) {
-          refreshedClanData.reserveList = refreshedClanData.reserveList.map((reserveList) =>
-            reserveList.filter((reserveData) => reserveData.playerData.userId !== playerData.userId),
+          this.operationLogRepository.deleteAllByUser(
+            refreshedClanData.categoryId,
+            playerData.userId,
           );
-          this.playerRepository.delete(refreshedClanData.categoryId, playerData.userId);
+          this.attackEntryRepository.deleteAllByUser(
+            refreshedClanData.categoryId,
+            playerData.userId,
+          );
+          this.resourceAdjustmentRepository.deleteAllByUser(
+            refreshedClanData.categoryId,
+            playerData.userId,
+          );
+          this.playerRepository.delete(refreshedClanData.categoryId, playerData.userId, {
+            preserveResolvedAttackStatuses: true,
+          });
           refreshedClanData.playerDataMap.delete(playerData.userId);
         }
+        this.options.runtimeStateService.syncProjectedStateForCategory(
+          refreshedClanData.categoryId,
+          refreshedClanData.date,
+        );
       });
 
       await this.redrawProgressTargets(
@@ -425,6 +492,13 @@ export class MemberService {
       );
 
       await this.updateRemainAttackMessage(
+        refreshedClanData,
+        {
+          ...request,
+          displayNamesByUserId,
+        },
+      );
+      await this.updateSummaryMessage(
         refreshedClanData,
         {
           ...request,
@@ -460,6 +534,14 @@ export class MemberService {
           ),
         );
       }
+      await this.ensureCurrentSummaryMessage(
+        currentClanData,
+        createMemberRenderContext(
+          request.member,
+          request.discordGateway,
+          request.displayNamesByUserId,
+        ),
+      );
 
       const refreshedClanData = this.options.runtimeStateService.get(request.categoryId);
       if (!refreshedClanData) {
@@ -503,11 +585,15 @@ export class MemberService {
 
     for (const [lap, bossStatusList] of clanData.bossStatusByLap.entries()) {
       bossStatusList.forEach((bossStatusData, bossIndex) => {
+        const hadRemovedUserAttackStatus = bossStatusData.attackPlayers.some((attackStatus) =>
+          removedUserIds.has(attackStatus.playerData.userId),
+        );
         const keptAttackStatuses = bossStatusData.attackPlayers.filter(
-          (attackStatus) => !removedUserIds.has(attackStatus.playerData.userId),
+          (attackStatus) =>
+            !removedUserIds.has(attackStatus.playerData.userId) || attackStatus.attacked,
         );
 
-        if (keptAttackStatuses.length === bossStatusData.attackPlayers.length) {
+        if (!hadRemovedUserAttackStatus) {
           return;
         }
 
@@ -534,430 +620,39 @@ export class MemberService {
     displayNamesByUserId: ReadonlyMap<string, string>,
     discordGateway: MemberDiscordGateway,
   ): Promise<void> {
-    for (const target of targets) {
-      await this.updateProgressMessage(clanData, target.lap, target.bossIndex, {
-        actor: {
-          id: "system",
-          displayName: "system",
-        },
-        discordGateway,
-        displayNamesByUserId,
-      });
-      await this.updateSummaryMessage(clanData, target.lap, target.bossIndex, {
-        actor: {
-          id: "system",
-          displayName: "system",
-        },
-        discordGateway,
-        displayNamesByUserId,
-      });
-    }
+    await this.messageCoordinator.redrawProgressTargets(
+      clanData,
+      targets,
+      displayNamesByUserId,
+      discordGateway,
+    );
   }
 
   private async updateRemainAttackMessage(
     clanData: ClanData,
     request: MemberRenderContext,
   ): Promise<void> {
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    mergeDisplayName(displayNamesByUserId, request.actor);
+    await this.messageCoordinator.updateRemainAttackMessage(clanData, request);
+  }
 
-    if (!clanData.remainAttackMessageId) {
-      await this.createCurrentRemainAttackMessage(clanData, {
-        ...request,
-        displayNamesByUserId,
-      });
-      return;
-    }
-
-    let remainAttackChannel: MemberTextChannel;
-    try {
-      remainAttackChannel = await request.discordGateway.getTextChannel(clanData.remainAttackChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve remain-attack channel for redraw", {
-        categoryId: clanData.categoryId,
-        error,
-      });
-      return;
-    }
-
-    const result = await this.editMessageWithRetry(
-      remainAttackChannel,
-      clanData.remainAttackMessageId,
-      buildRemainAttackEmbed(clanData, displayNamesByUserId, this.clock),
-      "remain-attack",
-      clanData.categoryId,
-    );
-
-    if (!result.updated && result.missing) {
-      clanData.remainAttackMessageId = null;
-      runInTransaction(this.options.database, () => {
-        this.clanRepository.update(clanData);
-      });
-      await this.createCurrentRemainAttackMessage(clanData, {
-        ...request,
-        displayNamesByUserId,
-      });
-    }
+  private async updateSummaryMessage(
+    clanData: ClanData,
+    request: MemberRenderContext,
+  ): Promise<void> {
+    await this.messageCoordinator.updateSummaryMessage(clanData, request);
   }
 
   private async createCurrentRemainAttackMessage(
     clanData: ClanData,
     request: MemberRenderContext,
   ): Promise<string | null> {
-    let remainAttackChannel: MemberTextChannel;
-    try {
-      remainAttackChannel = await request.discordGateway.getTextChannel(clanData.remainAttackChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve remain-attack channel", {
-        categoryId: clanData.categoryId,
-        error,
-      });
-      return null;
-    }
-
-    const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
-    mergeDisplayName(displayNamesByUserId, request.actor);
-
-    try {
-      const result = await sendRemainAttackMessage(
-        remainAttackChannel,
-        clanData,
-        displayNamesByUserId,
-        this.clock,
-      );
-      clanData.remainAttackMessageId = result.messageId;
-      runInTransaction(this.options.database, () => {
-        this.clanRepository.update(clanData);
-      });
-
-      if (!result.taskKillReactionAdded) {
-        this.logger.warn("Failed to add task-kill reaction to remain-attack message", {
-          categoryId: clanData.categoryId,
-          messageId: result.messageId,
-          error: result.taskKillReactionError,
-        });
-      }
-
-      return result.messageId;
-    } catch (error) {
-      this.logger.warn("Failed to create remain-attack message", {
-        categoryId: clanData.categoryId,
-        error,
-      });
-      return null;
-    }
+    return this.messageCoordinator.createCurrentRemainAttackMessage(clanData, request);
   }
 
-  private async updateProgressMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
+  private async ensureCurrentSummaryMessage(
+    clanData: ClanData | undefined,
     request: MemberRenderContext,
   ): Promise<void> {
-    const progressMessageId = clanData.progressMessageIdsByLap.get(lap)?.[bossIndex];
-    if (!progressMessageId) {
-      await this.ensureProgressMessage(clanData, lap, bossIndex, request);
-      return;
-    }
-
-    let bossChannel: MemberTextChannel;
-    try {
-      bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-    } catch (error) {
-      this.logger.warn("Failed to resolve boss channel for progress redraw", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const embed = renderProgressEmbed({
-      clanData,
-      lap,
-      bossIndex,
-      displayNamesByUserId: cloneDisplayNamesMap(request.displayNamesByUserId),
-    });
-
-    const result = await this.editMessageWithRetry(
-      bossChannel,
-      progressMessageId,
-      embed,
-      "progress",
-      clanData.categoryId,
-      lap,
-      bossIndex,
-    );
-
-    if (!result.updated && result.missing) {
-      await this.ensureProgressMessage(clanData, lap, bossIndex, request);
-    }
-  }
-
-  private async updateSummaryMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    request: MemberRenderContext,
-  ): Promise<void> {
-    const summaryMessageIds = clanData.summaryMessageIdsByLap.get(lap);
-    if (!summaryMessageIds) {
-      await this.ensureSummaryMessages(clanData, lap, request);
-      return;
-    }
-
-    const summaryMessageId = summaryMessageIds[bossIndex];
-    if (!summaryMessageId) {
-      await this.createSummaryMessage(clanData, lap, bossIndex, request, true);
-      return;
-    }
-
-    let summaryChannel: MemberTextChannel;
-    try {
-      summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve summary channel for redraw", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const embed = renderProgressEmbed({
-      clanData,
-      lap,
-      bossIndex,
-      displayNamesByUserId: cloneDisplayNamesMap(request.displayNamesByUserId),
-    });
-
-    const result = await this.editMessageWithRetry(
-      summaryChannel,
-      summaryMessageId,
-      embed,
-      "summary",
-      clanData.categoryId,
-      lap,
-      bossIndex,
-    );
-
-    if (!result.updated && result.missing) {
-      await this.createSummaryMessage(clanData, lap, bossIndex, request, true);
-    }
-  }
-
-  private async ensureProgressMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    request: MemberRenderContext,
-  ): Promise<void> {
-    let bossChannel: MemberTextChannel;
-    try {
-      bossChannel = await request.discordGateway.getTextChannel(clanData.bossChannelIds[bossIndex]!);
-    } catch (error) {
-      this.logger.warn("Failed to resolve boss channel for progress creation", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const embed = renderProgressEmbed({
-      clanData,
-      lap,
-      bossIndex,
-      displayNamesByUserId: cloneDisplayNamesMap(request.displayNamesByUserId),
-    });
-
-    try {
-      const progressMessage = await bossChannel.sendMessage({
-        embeds: [embed],
-      });
-
-      for (const emoji of PROGRESS_REACTIONS) {
-        await progressMessage.addReaction(emoji);
-      }
-
-      const hadProgressRow = clanData.progressMessageIdsByLap.has(lap);
-      const progressMessageIds = clanData.progressMessageIdsByLap.get(lap) ?? createBossSlots();
-      progressMessageIds[bossIndex] = progressMessage.id;
-      clanData.progressMessageIdsByLap.set(lap, progressMessageIds);
-
-      runInTransaction(this.options.database, () => {
-        if (hadProgressRow) {
-          this.progressMessageIdRepository.update(clanData.categoryId, lap, progressMessageIds);
-        } else {
-          this.progressMessageIdRepository.insert(clanData.categoryId, lap, progressMessageIds);
-        }
-      });
-
-      if (!clanData.summaryMessageIdsByLap.has(lap)) {
-        await this.ensureSummaryMessages(clanData, lap, request);
-      }
-    } catch (error) {
-      this.logger.warn("Failed to create progress message", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-    }
-  }
-
-  private async ensureSummaryMessages(
-    clanData: ClanData,
-    lap: number,
-    request: MemberRenderContext,
-  ): Promise<void> {
-    if (clanData.summaryMessageIdsByLap.has(lap)) {
-      return;
-    }
-
-    let summaryChannel: MemberTextChannel;
-    try {
-      summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve summary channel for creation", {
-        categoryId: clanData.categoryId,
-        lap,
-        error,
-      });
-      return;
-    }
-
-    const summaryMessageIds = createBossSlots();
-    for (let bossIndex = 0; bossIndex < clanData.bossChannelIds.length; bossIndex += 1) {
-      const embed = renderProgressEmbed({
-        clanData,
-        lap,
-        bossIndex,
-        displayNamesByUserId: cloneDisplayNamesMap(request.displayNamesByUserId),
-      });
-
-      try {
-        const summaryMessage = await summaryChannel.sendMessage({
-          embeds: [embed],
-        });
-        summaryMessageIds[bossIndex] = summaryMessage.id;
-      } catch (error) {
-        this.logger.warn("Failed to create summary mirror message", {
-          categoryId: clanData.categoryId,
-          lap,
-          bossIndex,
-          error,
-        });
-      }
-    }
-
-    clanData.summaryMessageIdsByLap.set(lap, summaryMessageIds);
-    runInTransaction(this.options.database, () => {
-      this.summaryMessageIdRepository.insert(clanData.categoryId, lap, summaryMessageIds);
-    });
-  }
-
-  private async createSummaryMessage(
-    clanData: ClanData,
-    lap: number,
-    bossIndex: number,
-    request: MemberRenderContext,
-    updateExistingRow: boolean,
-  ): Promise<void> {
-    let summaryChannel: MemberTextChannel;
-    try {
-      summaryChannel = await request.discordGateway.getTextChannel(clanData.summaryChannelId);
-    } catch (error) {
-      this.logger.warn("Failed to resolve summary channel for single-message creation", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-      return;
-    }
-
-    const embed = renderProgressEmbed({
-      clanData,
-      lap,
-      bossIndex,
-      displayNamesByUserId: cloneDisplayNamesMap(request.displayNamesByUserId),
-    });
-
-    try {
-      const summaryMessage = await summaryChannel.sendMessage({
-        embeds: [embed],
-      });
-
-      const summaryMessageIds = clanData.summaryMessageIdsByLap.get(lap) ?? createBossSlots();
-      summaryMessageIds[bossIndex] = summaryMessage.id;
-      clanData.summaryMessageIdsByLap.set(lap, summaryMessageIds);
-
-      runInTransaction(this.options.database, () => {
-        if (updateExistingRow || clanData.summaryMessageIdsByLap.has(lap)) {
-          this.summaryMessageIdRepository.update(clanData.categoryId, lap, summaryMessageIds);
-        } else {
-          this.summaryMessageIdRepository.insert(clanData.categoryId, lap, summaryMessageIds);
-        }
-      });
-    } catch (error) {
-      this.logger.warn("Failed to create summary message", {
-        categoryId: clanData.categoryId,
-        lap,
-        bossIndex,
-        error,
-      });
-    }
-  }
-
-  private async editMessageWithRetry(
-    channel: MemberTextChannel,
-    messageId: string,
-    embed: EmbedBuilder,
-    kind: "progress" | "summary" | "remain-attack",
-    categoryId: string,
-    lap?: number,
-    bossIndex?: number,
-  ): Promise<MessageUpdateResult> {
-    let lastError: unknown;
-    let missing = false;
-
-    for (let attempt = 0; attempt < DEFAULT_REDRAW_RETRY_COUNT; attempt += 1) {
-      try {
-        const message = await channel.fetchMessage(messageId);
-        await message.edit({
-          embeds: [embed],
-        });
-        return {
-          updated: true,
-          missing: false,
-        };
-      } catch (error) {
-        lastError = error;
-        missing = isMessageMissingError(error);
-
-        if (attempt < DEFAULT_REDRAW_RETRY_COUNT - 1) {
-          await sleep(this.redrawRetryDelayMs);
-        }
-      }
-    }
-
-    this.logger.warn("Failed to redraw Discord message", {
-      categoryId,
-      kind,
-      lap,
-      bossIndex,
-      messageId,
-      missing,
-      error: lastError,
-    });
-
-    return {
-      updated: false,
-      missing,
-    };
+    await this.messageCoordinator.ensureCurrentSummaryMessage(clanData, request);
   }
 }

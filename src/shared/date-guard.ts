@@ -8,10 +8,6 @@ export interface ClanBattleDayGuardResult {
   shouldCreateRemainAttackMessage: boolean;
 }
 
-function createEmptyReserveList<T>(bossCount: number): T[][] {
-  return Array.from({ length: bossCount }, () => []);
-}
-
 export function ensureClanBattleDay(
   clanData: ClanData,
   clock: Clock = systemClock,
@@ -30,12 +26,11 @@ export function ensureClanBattleDay(
 
   clanData.date = currentDayKey;
   clanData.remainAttackMessageId = null;
+  clanData.summaryMessageIdsByLap = new Map();
 
   for (const playerData of clanData.playerDataMap.values()) {
     playerData.initializeAttack();
   }
-
-  clanData.reserveList = createEmptyReserveList(clanData.bossChannelIds.length);
 
   return {
     changed: true,

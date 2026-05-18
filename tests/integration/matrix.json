@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "serviceScenarios": [
+    {
+      "id": "runtime-state",
+      "testFile": "tests/integration/runtime-state/runtime-state-service.test.ts",
+      "covers": ["sqlite restore", "in-memory state", "date guard"]
+    },
+    {
+      "id": "setup-service",
+      "testFile": "tests/integration/services/setup/clan-setup-service.test.ts",
+      "covers": ["setup", "message bootstrap", "sqlite persistence"]
+    },
+    {
+      "id": "member-service",
+      "testFile": "tests/integration/services/member/member-service.test.ts",
+      "covers": ["add", "remove", "remain embed redraw"]
+    },
+    {
+      "id": "attack-declare-service",
+      "testFile": "tests/integration/services/attack-declare/attack-service.test.ts",
+      "covers": ["attack_declare", "carry-over validation"]
+    },
+    {
+      "id": "attack-resolution-service",
+      "testFile": "tests/integration/services/attack-resolution/attack-service-resolution.test.ts",
+      "covers": ["attack_fin", "defeat_boss", "progress redraw"]
+    },
+    {
+      "id": "undo-resend-service",
+      "testFile": "tests/integration/services/undo-resend/undo-resend-service.test.ts",
+      "covers": ["boss-scoped undo", "resend"]
+    },
+    {
+      "id": "query-service",
+      "testFile": "tests/integration/services/query/clan-query-service.test.ts",
+      "covers": ["lap", "time"]
+    },
+    {
+      "id": "bossinfo-service",
+      "testFile": "tests/integration/services/bossinfo/bossinfo-service.test.ts",
+      "covers": ["bossinfo_show", "bossinfo_export_json", "bossinfo_edit"]
+    }
+  ],
+  "discordScenarios": [
+    {
+      "id": "bootstrap-router",
+      "testFile": "tests/integration/discord/bootstrap/discord-bootstrap.test.ts",
+      "covers": ["client bootstrap", "command registration", "interaction routing"]
+    },
+    {
+      "id": "slash-basic",
+      "testFile": "tests/integration/discord/slash-basic/slash-basic-handlers.test.ts",
+      "covers": ["setup", "add", "remove", "lap", "time"]
+    },
+    {
+      "id": "slash-battle",
+      "testFile": "tests/integration/discord/slash-battle/slash-battle-handlers.test.ts",
+      "covers": ["attack commands", "boss-scoped undo", "correction slash commands", "bossinfo slash commands"]
+    },
+    {
+      "id": "message-create",
+      "testFile": "tests/integration/discord/message-create/message-create-handler.test.ts",
+      "covers": ["damage message flow"]
+    },
+    {
+      "id": "reaction-handlers",
+      "testFile": "tests/integration/discord/reactions/reaction-handlers.test.ts",
+      "covers": ["progress reactions", "remain task kill", "reserve legacy reactions"]
+    },
+    {
+      "id": "bossinfo-wizard",
+      "testFile": "tests/integration/discord/bossinfo-wizard/bossinfo-wizard-handlers.test.ts",
+      "covers": ["buttons", "modals", "wizard save flow"]
+    }
+  ]
+}

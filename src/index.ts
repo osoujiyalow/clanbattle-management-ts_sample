@@ -6,11 +6,16 @@ import { registerBossInfoCommandHandlers } from "./discord/command-handlers/boss
 import { registerMemberCommandHandlers } from "./discord/command-handlers/member.js";
 import { registerQueryCommandHandlers } from "./discord/command-handlers/query.js";
 import { registerSetupCommandHandlers } from "./discord/command-handlers/setup.js";
+import { registerTlCommandHandlers } from "./discord/command-handlers/tl.js";
 import { createMessageCreateHandler } from "./discord/event-handlers/message-create.js";
 import { createReactionAddHandler } from "./discord/event-handlers/reaction-add.js";
 import { createReactionRemoveHandler } from "./discord/event-handlers/reaction-remove.js";
-import { bootstrapDiscordRuntime } from "./discord/client.js";
+import {
+  bootstrapDiscordRuntime,
+  createDiscordOrphanedCategoryScanClassifier,
+} from "./discord/client.js";
 import { InteractionRouter } from "./discord/interaction-router.js";
+import { resyncStartupMessageSurfaces } from "./discord/startup-message-surface-resync.js";
 import { ensureCoreSchema } from "./repositories/sqlite/core-schema.js";
 import { openSqliteDatabase } from "./repositories/sqlite/db.js";
 import { GuildBossInfoRepository } from "./repositories/sqlite/guild-bossinfo-repository.js";
@@ -21,6 +26,7 @@ import { ClanSetupService } from "./services/clan-setup-service.js";
 import { MemberService } from "./services/member-service.js";
 import { ProgressMessageService } from "./services/progress-message-service.js";
 import { RuntimeStateService } from "./services/runtime-state-service.js";
+import { TlConversionService } from "./services/tl-conversion-service.js";
 import { createLogger } from "./shared/logger.js";
 
 function hasCoreSchema(database: ReturnType<typeof openSqliteDatabase>): boolean {
@@ -86,19 +92,45 @@ export async function bootstrap(): Promise<void> {
     runtimeStateService,
     guildBossInfoRepository: new GuildBossInfoRepository(database),
   });
+  const tlConversionService = new TlConversionService();
 
   registerSetupCommandHandlers(router, { clanSetupService });
-  registerMemberCommandHandlers(router, { memberService });
-  registerQueryCommandHandlers(router, { clanQueryService });
-  registerAttackCommandHandlers(router, { attackService, progressMessageService });
+  registerMemberCommandHandlers(router, {
+    memberService,
+    runtimeStateService,
+  });
+  registerQueryCommandHandlers(router, {
+    clanQueryService,
+    runtimeStateService,
+  });
+  registerAttackCommandHandlers(router, {
+    attackService,
+    progressMessageService,
+    runtimeStateService,
+    memberService,
+  });
   registerBossInfoCommandHandlers(router, { bossInfoService });
+  registerTlCommandHandlers(router, { tlConversionService });
 
   await bootstrapDiscordRuntime({
     runtimeConfig,
     logger,
     router,
+    onReady: async (client) => {
+      const scanReport = await runtimeStateService.scanOrphanedCategories(
+        createDiscordOrphanedCategoryScanClassifier(client),
+      );
+      await resyncStartupMessageSurfaces({
+        client,
+        logger,
+        runtimeStateService,
+        memberService,
+        scanReport,
+      });
+    },
     onMessageCreate: createMessageCreateHandler({
       attackService,
+      runtimeStateService,
     }),
     onReactionAdd: createReactionAddHandler({
       runtimeStateService,

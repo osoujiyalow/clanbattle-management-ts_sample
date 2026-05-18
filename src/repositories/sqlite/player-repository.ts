@@ -12,21 +12,24 @@ interface PlayerDataRow {
   user_id: bigint;
   physics_attack: bigint;
   magic_attack: bigint;
+  battle_attack_count: bigint;
   task_kill: bigint | number | boolean;
 }
 
-const INSERT_PLAYER_DATA_SQL = `insert or ignore into PlayerData values (
-  ?,
-  ?,
-  0,
-  0,
-  0
-)`;
+const INSERT_PLAYER_DATA_SQL = `insert or ignore into PlayerData (
+  category_id,
+  user_id,
+  physics_attack,
+  magic_attack,
+  battle_attack_count,
+  task_kill
+) values (?, ?, 0, 0, 0, 0)`;
 
 const UPDATE_PLAYER_DATA_SQL = `update PlayerData
 set
   physics_attack=?,
   magic_attack=?,
+  battle_attack_count=?,
   task_kill=?
 where
   category_id=? and user_id=?`;
@@ -35,23 +38,28 @@ const DELETE_PLAYER_DATA_SQL = `delete from PlayerData
 where
   category_id=? and user_id=?`;
 
-const DELETE_PLAYER_DATA_FROM_RESERVE_DATA_SQL = `delete from ReserveData
-where
-  category_id=? and user_id=?`;
-
 const DELETE_PLAYER_DATA_FROM_ATTACK_STATUS_SQL = `delete from AttackStatus
 where
   category_id=? and user_id=?`;
 
+const DELETE_UNRESOLVED_PLAYER_DATA_FROM_ATTACK_STATUS_SQL = `delete from AttackStatus
+where
+  category_id=? and user_id=? and attacked=0`;
+
 const DELETE_PLAYER_DATA_FROM_CARRY_OVER_SQL = `delete from CarryOver
 where
   category_id=? and user_id=?`;
+
+const DELETE_ALL_PLAYER_DATA_SQL = `delete from PlayerData
+where
+  category_id=?`;
 
 const SELECT_ALL_PLAYER_DATA_SQL = "select * from PlayerData";
 
 function mapPlayerDataRowToDomain(row: PlayerDataRow): PlayerData {
   return PlayerData.fromRecord({
     userId: decodeSnowflake(row.user_id),
+    battleAttackCount: Number(row.battle_attack_count),
     physicsAttack: Number(row.physics_attack),
     magicAttack: Number(row.magic_attack),
     taskKill: decodeSqliteBoolean(row.task_kill),
@@ -76,20 +84,36 @@ export class PlayerRepository {
     this.database.prepare(UPDATE_PLAYER_DATA_SQL).run(
       playerData.physicsAttack,
       playerData.magicAttack,
+      playerData.battleAttackCount,
       encodeSqliteBoolean(playerData.taskKill),
       encodeSnowflake(categoryId),
       encodeSnowflake(playerData.userId),
     );
   }
 
-  delete(categoryId: string, userId: string): void {
+  delete(
+    categoryId: string,
+    userId: string,
+    options?: {
+      preserveResolvedAttackStatuses?: boolean;
+    },
+  ): void {
     const encodedCategoryId = encodeSnowflake(categoryId);
     const encodedUserId = encodeSnowflake(userId);
 
     this.database.prepare(DELETE_PLAYER_DATA_SQL).run(encodedCategoryId, encodedUserId);
     this.database.prepare(DELETE_PLAYER_DATA_FROM_CARRY_OVER_SQL).run(encodedCategoryId, encodedUserId);
-    this.database.prepare(DELETE_PLAYER_DATA_FROM_ATTACK_STATUS_SQL).run(encodedCategoryId, encodedUserId);
-    this.database.prepare(DELETE_PLAYER_DATA_FROM_RESERVE_DATA_SQL).run(encodedCategoryId, encodedUserId);
+    this.database
+      .prepare(
+        options?.preserveResolvedAttackStatuses
+          ? DELETE_UNRESOLVED_PLAYER_DATA_FROM_ATTACK_STATUS_SQL
+          : DELETE_PLAYER_DATA_FROM_ATTACK_STATUS_SQL,
+      )
+      .run(encodedCategoryId, encodedUserId);
+  }
+
+  deleteAllByCategory(categoryId: string): void {
+    this.database.prepare(DELETE_ALL_PLAYER_DATA_SQL).run(encodeSnowflake(categoryId));
   }
 
   findByCategoryId(categoryId: string): Map<string, PlayerData> {

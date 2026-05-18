@@ -8,7 +8,7 @@ import {
 
 import type { RuntimeConfig } from "../config/runtime.js";
 import { COMMAND_DESCRIPTIONS, OPTION_DESCRIPTIONS } from "../constants/messages.js";
-import { AttackType } from "../domain/attack-type.js";
+import { ATTACK_TYPE_INPUTS } from "../domain/attack-type.js";
 import type { Logger } from "../shared/logger.js";
 
 export type SlashCommandPayload = RESTPostAPIChatInputApplicationCommandsJSONBody;
@@ -27,9 +27,18 @@ export interface RegisterApplicationCommandsOptions {
 
 const GENERIC_OPTION_DESCRIPTION = "…";
 const ATTACK_TYPE_CHOICES: Array<{ name: string; value: string }> = [
-  { name: "物理", value: AttackType.PHYSICS },
-  { name: "魔法", value: AttackType.MAGIC },
-  { name: "持ち越し", value: AttackType.CARRYOVER },
+  { name: "本戦凸", value: ATTACK_TYPE_INPUTS.BATTLE },
+  { name: "持越凸", value: ATTACK_TYPE_INPUTS.CARRYOVER },
+];
+const RESOURCE_TYPE_CHOICES: Array<{ name: string; value: string }> = [
+  { name: "本戦凸", value: "battle" },
+  { name: "持越凸", value: "carryover" },
+];
+const REMAINING_CHOICES: Array<{ name: string; value: number }> = [
+  { name: "0", value: 0 },
+  { name: "1", value: 1 },
+  { name: "2", value: 2 },
+  { name: "3", value: 3 },
 ];
 
 export const SLASH_COMMAND_PAYLOADS = [
@@ -218,6 +227,12 @@ export const SLASH_COMMAND_PAYLOADS = [
         description: GENERIC_OPTION_DESCRIPTION,
         required: true,
       },
+      {
+        type: ApplicationCommandOptionType.Integer,
+        name: "boss_number",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: false,
+      },
     ],
   },
   {
@@ -241,13 +256,90 @@ export const SLASH_COMMAND_PAYLOADS = [
   },
   {
     type: ApplicationCommandType.ChatInput,
-    name: "calc_cot",
+    name: "time",
     description: COMMAND_DESCRIPTIONS.calcCot,
     options: [
       {
         type: ApplicationCommandOptionType.String,
         name: "values",
         description: OPTION_DESCRIPTIONS.calcCot.values,
+        required: true,
+      },
+    ],
+  },
+  {
+    type: ApplicationCommandType.ChatInput,
+    name: "tl",
+    description: COMMAND_DESCRIPTIONS.tlConvert,
+  },
+  {
+    type: ApplicationCommandType.ChatInput,
+    name: "adjust_remain_attack_count",
+    description: COMMAND_DESCRIPTIONS.adjustRemainAttackCount,
+    options: [
+      {
+        type: ApplicationCommandOptionType.User,
+        name: "member",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+      },
+      {
+        type: ApplicationCommandOptionType.String,
+        name: "type",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+        choices: RESOURCE_TYPE_CHOICES,
+      },
+      {
+        type: ApplicationCommandOptionType.Integer,
+        name: "remaining",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+        choices: REMAINING_CHOICES,
+      },
+    ],
+  },
+  {
+    type: ApplicationCommandType.ChatInput,
+    name: "correct_attack_kind",
+    description: COMMAND_DESCRIPTIONS.correctAttackKind,
+    options: [
+      {
+        type: ApplicationCommandOptionType.Integer,
+        name: "lap",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+      },
+      {
+        type: ApplicationCommandOptionType.Integer,
+        name: "boss_number",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+      },
+    ],
+  },
+  {
+    type: ApplicationCommandType.ChatInput,
+    name: "admin_correct_attack_kind",
+    description: COMMAND_DESCRIPTIONS.adminCorrectAttackKind,
+    default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+    options: [
+      {
+        type: ApplicationCommandOptionType.User,
+        name: "member",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+      },
+      {
+        type: ApplicationCommandOptionType.Integer,
+        name: "lap",
+        description: GENERIC_OPTION_DESCRIPTION,
+        required: true,
+      },
+      {
+        type: ApplicationCommandOptionType.Integer,
+        name: "boss_number",
+        description: GENERIC_OPTION_DESCRIPTION,
         required: true,
       },
     ],

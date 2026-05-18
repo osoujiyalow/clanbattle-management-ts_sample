@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "catalogKind": "raw",
+  "capturedAt": "2026-03-08",
+  "cases": [
+    {
+      "id": "setup/basic",
+      "title": "Managed category bootstrap",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:322",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:679",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1008",
+        "clanbattle-management-py_ver2/setup.sql:1"
+      ],
+      "capturedArtifacts": [
+        "Public setup start/finish messages",
+        "Created category and channel order",
+        "Initial progress reactions and remain-attack reaction",
+        "Lap 1 SQLite bootstrap rows"
+      ],
+      "notes": "Reserve channel is intentionally not created in Python ver2."
+    },
+    {
+      "id": "add/member-self",
+      "title": "Add self as managed member",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:256",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1001",
+        "clanbattle-management-py_ver2/setup.sql:21"
+      ],
+      "capturedArtifacts": [
+        "Public add reply text",
+        "Remain-attack embed refresh",
+        "PlayerData insert shape"
+      ],
+      "notes": "No user permission gate is applied."
+    },
+    {
+      "id": "attack_declare/basic",
+      "title": "Declare a physics attack",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:466",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:818",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:717",
+        "clanbattle-management-py_ver2/setup.sql:39"
+      ],
+      "capturedArtifacts": [
+        "Public declare reply template",
+        "Progress/summary embed refresh",
+        "AttackStatus insert contract"
+      ],
+      "notes": "Carry-over declaration is blocked only when no carry-over exists."
+    },
+    {
+      "id": "message_damage/basic",
+      "title": "Apply damage from a normal message",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1095",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:717",
+        "clanbattle-management-py_ver2/setup.sql:39"
+      ],
+      "capturedArtifacts": [
+        "No direct reply",
+        "Progress/summary embed refresh",
+        "AttackStatus damage and memo update"
+      ],
+      "notes": "The newest undealt declaration on the latest lap wins."
+    },
+    {
+      "id": "attack_fin/basic",
+      "title": "Consume a declared attack",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:481",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:781",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1001",
+        "clanbattle-management-py_ver2/setup.sql:21",
+        "clanbattle-management-py_ver2/setup.sql:39"
+      ],
+      "capturedArtifacts": [
+        "Public finish reply template",
+        "Progress/summary/remain embed refresh",
+        "AttackStatus and PlayerData update contract"
+      ],
+      "notes": "Matching reserve entries may be deleted as a side effect."
+    },
+    {
+      "id": "defeat_boss/basic",
+      "title": "Mark boss defeated and open next lap",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:508",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:831",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:679",
+        "clanbattle-management-py_ver2/setup.sql:52",
+        "clanbattle-management-py_ver2/setup.sql:59",
+        "clanbattle-management-py_ver2/setup.sql:68",
+        "clanbattle-management-py_ver2/setup.sql:78"
+      ],
+      "capturedArtifacts": [
+        "Public defeat reply template",
+        "Current-lap defeat state in progress embed",
+        "Next-lap progress/bootstrap side effects",
+        "BossStatusData and CarryOver updates"
+      ],
+      "notes": "Next-lap summary mirrors are created through the same progress send path."
+    },
+    {
+      "id": "undo/basic",
+      "title": "Undo a consumed attack",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:538",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:575",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:717",
+        "clanbattle-management-py_ver2/setup.sql:21",
+        "clanbattle-management-py_ver2/setup.sql:39",
+        "clanbattle-management-py_ver2/setup.sql:59"
+      ],
+      "capturedArtifacts": [
+        "Public undo reply template for ATTACK undo",
+        "Representative ATTACK undo refreshes progress/summary/remain embeds",
+        "AttackStatus reversal and PlayerData snapshot restore"
+      ],
+      "notes": "This representative case covers ATTACK undo after a resolved attack. Undo scope depends on the latest in-memory log entry."
+    },
+    {
+      "id": "bossinfo_edit/basic",
+      "title": "Bossinfo wizard save flow",
+      "captureMethod": "python-source-review",
+      "pythonSourceRefs": [
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:395",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1399",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1502",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1536",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1612",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1708",
+        "clanbattle-management-py_ver2/cogs/clan_battle.py:1738",
+        "clanbattle-management-py_ver2/setup.sql:88"
+      ],
+      "capturedArtifacts": [
+        "Ephemeral intro, boundary, hp, confirm, and save texts",
+        "Wizard modal/button sequence",
+        "GuildBossInfoConfig upsert contract"
+      ],
+      "notes": "The saved config becomes the guild-level source of truth in SQLite."
+    }
+  ]
+}

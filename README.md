@@ -1,7 +1,7 @@
-# clanbattle-management-ts_sample
+# clanbattle-management-ts-sample
 
-Discord のクランバトル管理 Bot 用の最小構成 TypeScript サンプルです。
-hibiさんのハンナbotを元に作りました。
+Discord のクランバトル管理 Bot 用 TypeScript サンプルです。
+移植元で動いている実装を、公開 GitHub に載せられる形へ整えたものです。
 
 このプロジェクトでは次を使用しています。
 
@@ -9,12 +9,19 @@ hibiさんのハンナbotを元に作りました。
 - discord.js
 - SQLite via `better-sqlite3`
 
+## 公開前の注意
+
+- `.env`、Discord Bot token、実運用の SQLite DB、`logs/`、`node_modules/`、`dist/` はコミットしないでください。
+- `.env.example` にはダミー値だけを置いています。実際の token や guild id は `.env` にだけ入れてください。
+- GitHub Actions などの本番デプロイ設定は、この公開サンプルには含めない方針です。
+
 ## できること
 
 - Discord のスラッシュコマンドを登録する
 - 実行時データを SQLite に保存する
 - クラン設定、メンバー、凸状況、ボス情報を管理する
 - ログをローカルの `logs/` ディレクトリに出力する
+- 移植元と同じテストを実行して、主要動作を確認する
 
 ## 動作要件
 
@@ -72,6 +79,12 @@ npm run dev
 
 ```bash
 npm run typecheck
+```
+
+テスト:
+
+```bash
+npm test
 ```
 
 ビルド:

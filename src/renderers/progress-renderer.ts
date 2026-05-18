@@ -36,10 +36,9 @@ export function renderProgressEmbed(input: ProgressRendererInput): EmbedBuilder 
       continue;
     }
 
-    const displayName = input.displayNamesByUserId.get(attackStatus.playerData.userId);
-    if (!displayName) {
-      continue;
-    }
+    const displayName =
+      input.displayNamesByUserId.get(attackStatus.playerData.userId) ??
+      attackStatus.playerData.userId;
 
     attackedList.push(
       `(${attackStatus.attackType}済み) ${formatDamage(attackStatus.damage)}万 ${displayName}`,
@@ -52,10 +51,9 @@ export function renderProgressEmbed(input: ProgressRendererInput): EmbedBuilder 
       continue;
     }
 
-    const displayName = input.displayNamesByUserId.get(attackStatus.playerData.userId);
-    if (!displayName) {
-      continue;
-    }
+    const displayName =
+      input.displayNamesByUserId.get(attackStatus.playerData.userId) ??
+      attackStatus.playerData.userId;
 
     attackList.push(attackStatus.createAttackStatusTxt(displayName, currentHp));
     totalDamage += attackStatus.damage;

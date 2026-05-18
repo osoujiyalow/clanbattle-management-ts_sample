@@ -1,5 +1,7 @@
 import {
   Client,
+  ChannelType,
+  DiscordAPIError,
   Events,
   GatewayIntentBits,
   Partials,
@@ -12,6 +14,11 @@ import {
 } from "discord.js";
 
 import type { RuntimeConfig } from "../config/runtime.js";
+import type { ClanData } from "../domain/clan-data.js";
+import type {
+  OrphanedCategoryScanClassification,
+  OrphanedCategoryScanClassifier,
+} from "../services/runtime-state-service.js";
 import type { Logger } from "../shared/logger.js";
 import type { InteractionRouter } from "./interaction-router.js";
 import {
@@ -55,6 +62,7 @@ export interface DiscordBootstrapOptions {
   runtimeConfig: RuntimeConfig;
   logger: Logger;
   router: InteractionRouter;
+  onReady?: ReadyHook;
   onMessageCreate?: MessageCreateHook;
   onReactionAdd?: ReactionHook;
   onReactionRemove?: ReactionHook;
@@ -64,6 +72,7 @@ export function createDiscordReadyHook(options: {
   runtimeConfig: RuntimeConfig;
   logger: Logger;
   apiFactory?: (client: ReadyClient) => CommandRegistrationApi;
+  onReady?: ReadyHook;
 }): ReadyHook {
   return async (client) => {
     options.logger.info("Login was successful.");
@@ -75,6 +84,70 @@ export function createDiscordReadyHook(options: {
       logger: options.logger,
       api: options.apiFactory?.(client) ?? new DiscordCommandRegistrationApi(client),
     });
+
+    await options.onReady?.(client);
+  };
+}
+
+function isUnknownChannelError(error: unknown): error is DiscordAPIError {
+  return error instanceof DiscordAPIError && error.code === 10_003;
+}
+
+export function createDiscordOrphanedCategoryScanClassifier(
+  client: ReadyClient,
+): OrphanedCategoryScanClassifier {
+  return {
+    async classify(clanData: ClanData): Promise<OrphanedCategoryScanClassification> {
+      let guild;
+      try {
+        guild = await client.guilds.fetch(clanData.guildId);
+      } catch (error) {
+        return {
+          status: "scan-deferred",
+          reason: "guild-fetch-failed",
+          details: { error },
+        };
+      }
+
+      try {
+        const category = await guild.channels.fetch(clanData.categoryId);
+        if (!category) {
+          return {
+            status: "orphaned",
+            reason: "category-not-found",
+          };
+        }
+
+        if (category.type !== ChannelType.GuildCategory) {
+          return {
+            status: "orphaned",
+            reason: "category-id-not-category",
+            details: {
+              resolvedChannelType: category.type,
+            },
+          };
+        }
+
+        return {
+          status: "active",
+          reason: "category-resolved",
+        };
+      } catch (error) {
+        if (isUnknownChannelError(error)) {
+          return {
+            status: "orphaned",
+            reason: "category-not-found",
+            details: { errorCode: error.code },
+          };
+        }
+
+        return {
+          status: "scan-deferred",
+          reason: "category-fetch-failed",
+          details: { error },
+        };
+      }
+    },
   };
 }
 
@@ -168,6 +241,7 @@ export async function bootstrapDiscordRuntime(
     onReady: createDiscordReadyHook({
       runtimeConfig: options.runtimeConfig,
       logger: options.logger,
+      ...(options.onReady ? { onReady: options.onReady } : {}),
     }),
   });
 

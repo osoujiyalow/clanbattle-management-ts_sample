@@ -1,17 +1,22 @@
 import type { ChatInputCommandInteraction } from "discord.js";
 
+import { ResourceAdjustmentType } from "../../domain/resource-adjustment.js";
 import type { ClanQueryService } from "../../services/clan-query-service.js";
+import type { RuntimeStateService } from "../../services/runtime-state-service.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import {
   DiscordGuildTextGateway,
   SlashResponseChannelAdapter,
   deferChatInputReply,
-  resolveGuildDisplayNames,
+  resolveCachedGuildDisplayNames,
+  resolveGuildDisplayNamesForUserIds,
+  resolveMemberIdentity,
   resolveManagedInteractionContext,
 } from "./shared.js";
 
 export interface QueryCommandHandlersOptions {
-  clanQueryService: Pick<ClanQueryService, "setLap" | "calcCarryOver">;
+  clanQueryService: Pick<ClanQueryService, "setLap" | "calcCarryOver" | "adjustRemainAttackCount">;
+  runtimeStateService: Pick<RuntimeStateService, "get">;
 }
 
 function createQueryResponseChannel(interaction: ChatInputCommandInteraction): SlashResponseChannelAdapter {
@@ -32,16 +37,20 @@ export async function handleLapCommand(
   await deferChatInputReply(interaction, false);
 
   const managedContext = await resolveManagedInteractionContext(interaction);
+  const categoryId = managedContext.categoryId ?? interaction.channelId;
   const bossNumber = interaction.options.getInteger("boss_number");
+  const clanData = options.runtimeStateService.get(categoryId);
 
   await options.clanQueryService.setLap({
-    categoryId: managedContext.categoryId ?? interaction.channelId,
+    categoryId,
     channelId: interaction.channelId,
     lap: interaction.options.getInteger("lap", true),
     ...(bossNumber !== null ? { bossNumber } : {}),
     responseChannel: createQueryResponseChannel(interaction),
     discordGateway: new DiscordGuildTextGateway(interaction.guild),
-    displayNamesByUserId: await resolveGuildDisplayNames(interaction.guild),
+    displayNamesByUserId: clanData
+      ? await resolveGuildDisplayNamesForUserIds(interaction.guild, clanData.playerDataMap.keys())
+      : resolveCachedGuildDisplayNames(interaction.guild),
   });
 }
 
@@ -57,14 +66,64 @@ export async function handleCalcCarryOverCommand(
   });
 }
 
+export async function handleAdjustRemainAttackCountCommand(
+  interaction: ChatInputCommandInteraction,
+  options: QueryCommandHandlersOptions,
+): Promise<void> {
+  if (!interaction.guild) {
+    throw new Error("Guild interaction is required.");
+  }
+
+  await deferChatInputReply(interaction, false);
+
+  const managedContext = await resolveManagedInteractionContext(interaction);
+  const categoryId = managedContext.categoryId ?? interaction.channelId;
+  const clanData = options.runtimeStateService.get(categoryId);
+  const member = await resolveMemberIdentity(interaction.guild, interaction.options.getUser("member", true));
+  const actor = await resolveMemberIdentity(interaction.guild, interaction.user);
+  const typeValue = interaction.options.getString("type", true);
+
+  await options.clanQueryService.adjustRemainAttackCount({
+    categoryId,
+    channelId: interaction.channelId,
+    actor,
+    member,
+    type:
+      typeValue === ResourceAdjustmentType.BATTLE
+        ? ResourceAdjustmentType.BATTLE
+        : ResourceAdjustmentType.CARRYOVER,
+    remaining: interaction.options.getInteger("remaining", true),
+    responseChannel: createQueryResponseChannel(interaction),
+    discordGateway: new DiscordGuildTextGateway(interaction.guild),
+    displayNamesByUserId: clanData
+      ? await resolveGuildDisplayNamesForUserIds(interaction.guild, clanData.playerDataMap.keys())
+      : resolveCachedGuildDisplayNames(interaction.guild),
+  });
+}
+
 export function registerQueryCommandHandlers(
   router: InteractionRouter,
   options: QueryCommandHandlersOptions,
 ): void {
+  router.registerChatInputCommand("周回数変更", async (interaction) => {
+    await handleLapCommand(interaction, options);
+  });
   router.registerChatInputCommand("lap", async (interaction) => {
     await handleLapCommand(interaction, options);
   });
+  router.registerChatInputCommand("持越し計算", async (interaction) => {
+    await handleCalcCarryOverCommand(interaction, options);
+  });
+  router.registerChatInputCommand("time", async (interaction) => {
+    await handleCalcCarryOverCommand(interaction, options);
+  });
   router.registerChatInputCommand("calc_cot", async (interaction) => {
     await handleCalcCarryOverCommand(interaction, options);
+  });
+  router.registerChatInputCommand("残凸修正", async (interaction) => {
+    await handleAdjustRemainAttackCountCommand(interaction, options);
+  });
+  router.registerChatInputCommand("adjust_remain_attack_count", async (interaction) => {
+    await handleAdjustRemainAttackCountCommand(interaction, options);
   });
 }

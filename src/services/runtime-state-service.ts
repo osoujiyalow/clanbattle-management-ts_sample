@@ -1,13 +1,17 @@
+import type { AttackEntry } from "../domain/attack-entry.js";
 import { BossStatusData } from "../domain/boss-status-data.js";
 import { ClanBattleData } from "../domain/clan-battle-data.js";
 import { type ClanData } from "../domain/clan-data.js";
-import { type AttackStatus } from "../domain/attack-status.js";
+import type { OperationLog } from "../domain/operation-log.js";
+import type { PlayerResourceState } from "../domain/player-resource-state.js";
+import type { AttackStatus } from "../domain/attack-status.js";
 import { CarryOver } from "../domain/player-data.js";
 import { InternalError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { CategoryLock } from "../shared/category-lock.js";
 import { ensureClanBattleDay, type ClanBattleDayGuardResult } from "../shared/date-guard.js";
-import { type Clock, systemClock } from "../shared/time.js";
+import { getClanBattleDayKeyFromClock, now, type Clock, systemClock } from "../shared/time.js";
+import { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import { AttackStatusRepository } from "../repositories/sqlite/attack-status-repository.js";
 import { BossStatusRepository } from "../repositories/sqlite/boss-status-repository.js";
 import {
@@ -18,8 +22,17 @@ import { CarryOverRepository } from "../repositories/sqlite/carry-over-repositor
 import { ClanRepository } from "../repositories/sqlite/clan-repository.js";
 import { runInTransaction, type SqliteDatabase } from "../repositories/sqlite/db.js";
 import { GuildBossInfoRepository } from "../repositories/sqlite/guild-bossinfo-repository.js";
+import { OperationLogRepository } from "../repositories/sqlite/operation-log-repository.js";
 import { PlayerRepository } from "../repositories/sqlite/player-repository.js";
-import { ReserveRepository } from "../repositories/sqlite/reserve-repository.js";
+import { PlayerResourceStateRepository } from "../repositories/sqlite/player-resource-state-repository.js";
+import { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
+import { ensureCoreSchema } from "../repositories/sqlite/core-schema.js";
+import { encodeSnowflake } from "../repositories/sqlite/sqlite-codec.js";
+import { ensureRuntimeBossStatusList } from "./runtime-state-legacy-compatibility.js";
+import {
+  RuntimeStateProjectionCoordinator,
+  type ProjectedStateRefreshResult,
+} from "./runtime-state-projection-coordinator.js";
 
 const NOOP_LOGGER: Logger = {
   debug() {},
@@ -28,33 +41,55 @@ const NOOP_LOGGER: Logger = {
   error() {},
 };
 
-function createBossStatusList(clanData: ClanData, lap: number): BossStatusData[] {
-  return Array.from({ length: clanData.bossChannelIds.length }, (_, bossIndex) => {
-    return new BossStatusData({
-      lap,
-      bossIndex,
-      guildId: clanData.guildId,
-    });
-  });
+export type OrphanedCategoryScanStatus = "active" | "orphaned" | "scan-deferred";
+
+export interface OrphanedCategoryScanClassification {
+  status: OrphanedCategoryScanStatus;
+  reason: string;
+  details?: Readonly<Record<string, unknown>>;
 }
 
-function ensureBossStatusList(clanData: ClanData, lap: number): BossStatusData[] {
-  const existing = clanData.bossStatusByLap.get(lap);
+export interface OrphanedCategoryScanClassifier {
+  classify(clanData: ClanData): Promise<OrphanedCategoryScanClassification>;
+}
 
-  if (existing) {
-    return existing;
-  }
+export interface OrphanedCategoryScanRecord {
+  guildId: string;
+  categoryId: string;
+  status: OrphanedCategoryScanStatus;
+  reason: string;
+  day: string;
+  commandChannelId: string;
+  remainAttackChannelId: string;
+  bossChannelIds: readonly string[];
+  details?: Readonly<Record<string, unknown>>;
+}
 
-  const created = createBossStatusList(clanData, lap);
-  clanData.bossStatusByLap.set(lap, created);
-  return created;
+export interface OrphanedCategoryScanReport {
+  scannedAt: string;
+  scannedCount: number;
+  activeCount: number;
+  orphanedCount: number;
+  scanDeferredCount: number;
+  records: readonly OrphanedCategoryScanRecord[];
+}
+
+export interface OrphanedCategoryCleanupResult {
+  categoryId: string;
+  guildId: string;
+  deletedCounts: Readonly<Record<string, number>>;
+  remainingGuildCategoryCount: number;
+  guildConfigDeleted: false;
 }
 
 export interface RuntimeStateServiceOptions {
   database: SqliteDatabase;
   clanRepository?: ClanRepository;
   playerRepository?: PlayerRepository;
-  reserveRepository?: ReserveRepository;
+  attackEntryRepository?: AttackEntryRepository;
+  playerResourceStateRepository?: PlayerResourceStateRepository;
+  operationLogRepository?: OperationLogRepository;
+  resourceAdjustmentRepository?: ResourceAdjustmentRepository;
   attackStatusRepository?: AttackStatusRepository;
   bossStatusRepository?: BossStatusRepository;
   carryOverRepository?: CarryOverRepository;
@@ -73,7 +108,10 @@ interface PendingAttackStatusDeletion {
 export class RuntimeStateService {
   private readonly clanRepository: ClanRepository;
   private readonly playerRepository: PlayerRepository;
-  private readonly reserveRepository: ReserveRepository;
+  private readonly attackEntryRepository: AttackEntryRepository;
+  private readonly playerResourceStateRepository: PlayerResourceStateRepository;
+  private readonly operationLogRepository: OperationLogRepository;
+  private readonly resourceAdjustmentRepository: ResourceAdjustmentRepository;
   private readonly attackStatusRepository: AttackStatusRepository;
   private readonly bossStatusRepository: BossStatusRepository;
   private readonly carryOverRepository: CarryOverRepository;
@@ -84,13 +122,28 @@ export class RuntimeStateService {
   private readonly logger: Logger;
   private readonly clock: Clock;
   private readonly database: SqliteDatabase;
+  private readonly projectionCoordinator: RuntimeStateProjectionCoordinator;
   private clanDataByCategory = new Map<string, ClanData>();
+  private attackEntriesByCategory = new Map<string, AttackEntry[]>();
+  private playerResourceStateByCategory = new Map<
+    string,
+    Map<string, Map<string, PlayerResourceState>>
+  >();
+  private operationLogsByCategory = new Map<string, OperationLog[]>();
+  private lastOrphanedCategoryScanReport: OrphanedCategoryScanReport | null = null;
 
   constructor(options: RuntimeStateServiceOptions) {
     this.database = options.database;
     this.clanRepository = options.clanRepository ?? new ClanRepository(options.database);
     this.playerRepository = options.playerRepository ?? new PlayerRepository(options.database);
-    this.reserveRepository = options.reserveRepository ?? new ReserveRepository(options.database);
+    this.attackEntryRepository =
+      options.attackEntryRepository ?? new AttackEntryRepository(options.database);
+    this.playerResourceStateRepository =
+      options.playerResourceStateRepository ?? new PlayerResourceStateRepository(options.database);
+    this.operationLogRepository =
+      options.operationLogRepository ?? new OperationLogRepository(options.database);
+    this.resourceAdjustmentRepository =
+      options.resourceAdjustmentRepository ?? new ResourceAdjustmentRepository(options.database);
     this.attackStatusRepository =
       options.attackStatusRepository ?? new AttackStatusRepository(options.database);
     this.bossStatusRepository =
@@ -104,15 +157,22 @@ export class RuntimeStateService {
     this.categoryLock = options.categoryLock ?? new CategoryLock();
     this.logger = options.logger ?? NOOP_LOGGER;
     this.clock = options.clock ?? systemClock;
+    this.projectionCoordinator = new RuntimeStateProjectionCoordinator({
+      attackEntryRepository: this.attackEntryRepository,
+      playerResourceStateRepository: this.playerResourceStateRepository,
+      operationLogRepository: this.operationLogRepository,
+      resourceAdjustmentRepository: this.resourceAdjustmentRepository,
+    });
   }
 
   restoreFromDatabase(): ReadonlyMap<string, ClanData> {
+    ensureCoreSchema(this.database);
+
     const guildConfigMap = this.guildBossInfoRepository.loadAll();
     ClanBattleData.loadGuildConfigMap(guildConfigMap);
 
     const clanMap = this.clanRepository.findAll();
     const playerMapByCategory = this.playerRepository.findAllGroupedByCategory();
-    const reserveMapByCategory = this.reserveRepository.findAllGroupedByCategory(playerMapByCategory);
     const bossStatusMapByCategory = this.bossStatusRepository.findAllGroupedByCategory(clanMap);
     const attackStatusMapByCategory =
       this.attackStatusRepository.findAllGroupedByCategory(playerMapByCategory);
@@ -120,13 +180,11 @@ export class RuntimeStateService {
       this.carryOverRepository.findAllGroupedByCategory(playerMapByCategory);
     const progressMessageIdsByCategory = this.progressMessageIdRepository.findAllGroupedByCategory();
     const summaryMessageIdsByCategory = this.summaryMessageIdRepository.findAllGroupedByCategory();
-    let retiredLegacyReserveCount = 0;
 
     for (const [categoryId, clanData] of clanMap.entries()) {
       const playerMap = playerMapByCategory.get(categoryId);
       playerMap?.forEach((playerData) => clanData.addPlayerData(playerData));
 
-      clanData.reserveList = reserveMapByCategory.get(categoryId) ?? clanData.reserveList;
       clanData.bossStatusByLap = bossStatusMapByCategory.get(categoryId) ?? new Map();
       clanData.progressMessageIdsByLap = progressMessageIdsByCategory.get(categoryId) ?? new Map();
       clanData.summaryMessageIdsByLap = summaryMessageIdsByCategory.get(categoryId) ?? new Map();
@@ -145,7 +203,7 @@ export class RuntimeStateService {
 
       const attackStatusByLap = attackStatusMapByCategory.get(categoryId);
       attackStatusByLap?.forEach((attackStatusByBoss, lap) => {
-        const bossStatusList = ensureBossStatusList(clanData, lap);
+        const bossStatusList = ensureRuntimeBossStatusList(clanData, lap);
         attackStatusByBoss.forEach((attackStatusList, bossIndex) => {
           const bossStatusData =
             bossStatusList[bossIndex] ??
@@ -158,17 +216,17 @@ export class RuntimeStateService {
           bossStatusList[bossIndex] = bossStatusData;
         });
       });
-
-      if (this.cleanupLegacyReserveState(clanData)) {
-        retiredLegacyReserveCount += 1;
-      }
     }
 
     this.clanDataByCategory = clanMap;
+    for (const categoryId of clanMap.keys()) {
+      this.ensureDateUpToDateLocked(categoryId, this.clock);
+    }
+
+    this.refreshProjectedRuntimeState(clanMap);
     this.logger.info("Runtime state restored from SQLite", {
       categoryCount: clanMap.size,
       guildBossInfoCount: guildConfigMap.size,
-      retiredLegacyReserveCount,
     });
 
     return this.getAll();
@@ -182,12 +240,216 @@ export class RuntimeStateService {
     return new Map(this.clanDataByCategory);
   }
 
+  getLastOrphanedCategoryScanReport(): OrphanedCategoryScanReport | null {
+    if (!this.lastOrphanedCategoryScanReport) {
+      return null;
+    }
+
+    return {
+      ...this.lastOrphanedCategoryScanReport,
+      records: this.lastOrphanedCategoryScanReport.records.map((record) => ({
+        ...record,
+        bossChannelIds: [...record.bossChannelIds],
+      })),
+    };
+  }
+
+  getCleanupEligibleOrphanedCategories(): readonly OrphanedCategoryScanRecord[] {
+    return this.lastOrphanedCategoryScanReport?.records.filter((record) => record.status === "orphaned") ?? [];
+  }
+
+  async scanOrphanedCategories(
+    classifier: OrphanedCategoryScanClassifier,
+  ): Promise<OrphanedCategoryScanReport> {
+    const scannedAt = now(this.clock).toISOString();
+    const records: OrphanedCategoryScanRecord[] = [];
+
+    for (const clanData of Array.from(this.clanDataByCategory.values()).sort((left, right) =>
+      left.categoryId.localeCompare(right.categoryId),
+    )) {
+      let classification: OrphanedCategoryScanClassification;
+
+      try {
+        classification = await classifier.classify(clanData);
+      } catch (error) {
+        classification = {
+          status: "scan-deferred",
+          reason: "classification-threw",
+          details: { error },
+        };
+      }
+
+      const record: OrphanedCategoryScanRecord = {
+        guildId: clanData.guildId,
+        categoryId: clanData.categoryId,
+        status: classification.status,
+        reason: classification.reason,
+        day: clanData.date,
+        commandChannelId: clanData.commandChannelId,
+        remainAttackChannelId: clanData.remainAttackChannelId,
+        bossChannelIds: [...clanData.bossChannelIds],
+        ...(classification.details ? { details: classification.details } : {}),
+      };
+      records.push(record);
+
+      if (record.status === "orphaned") {
+        this.logger.warn("Orphaned category detected during startup scan", { ...record });
+      } else if (record.status === "scan-deferred") {
+        this.logger.warn("Orphaned-category scan deferred", { ...record });
+      }
+    }
+
+    const report: OrphanedCategoryScanReport = {
+      scannedAt,
+      scannedCount: records.length,
+      activeCount: records.filter((record) => record.status === "active").length,
+      orphanedCount: records.filter((record) => record.status === "orphaned").length,
+      scanDeferredCount: records.filter((record) => record.status === "scan-deferred").length,
+      records,
+    };
+
+    this.lastOrphanedCategoryScanReport = report;
+    this.logger.info("Startup orphaned-category scan completed", {
+      scannedAt,
+      scannedCount: report.scannedCount,
+      activeCount: report.activeCount,
+      orphanedCount: report.orphanedCount,
+      scanDeferredCount: report.scanDeferredCount,
+    });
+
+    return this.getLastOrphanedCategoryScanReport()!;
+  }
+
+  cleanupOrphanedCategory(categoryId: string): OrphanedCategoryCleanupResult {
+    const scanRecord = this.lastOrphanedCategoryScanReport?.records.find((record) => record.categoryId === categoryId);
+    if (!scanRecord) {
+      throw new InternalError(
+        "runtime-state.orphaned-category-scan-required",
+        `No orphaned-category scan record found for category id: ${categoryId}`,
+        {
+          details: { categoryId },
+        },
+      );
+    }
+
+    if (scanRecord.status !== "orphaned") {
+      throw new InternalError(
+        "runtime-state.orphaned-category-cleanup-not-eligible",
+        `Category id ${categoryId} is not eligible for orphaned cleanup.`,
+        {
+          details: {
+            categoryId,
+            status: scanRecord.status,
+            reason: scanRecord.reason,
+          },
+        },
+      );
+    }
+
+    const clanData = this.getOrThrow(categoryId);
+    const deletedCounts = runInTransaction(this.database, () => {
+      const counts = {
+        ClanData: this.countRowsByCategory("ClanData", categoryId),
+        PlayerData: this.countRowsByCategory("PlayerData", categoryId),
+        BossStatusData: this.countRowsByCategory("BossStatusData", categoryId),
+        AttackStatus: this.countRowsByCategory("AttackStatus", categoryId),
+        CarryOver: this.countRowsByCategory("CarryOver", categoryId),
+        AttackEntry: this.countRowsByCategory("AttackEntry", categoryId),
+        PlayerResourceState: this.countRowsByCategory("PlayerResourceState", categoryId),
+        OperationLog: this.countRowsByCategory("OperationLog", categoryId),
+        ResourceAdjustmentLog: this.countRowsByCategory("ResourceAdjustmentLog", categoryId),
+        ProgressMessageIdData: this.countRowsByCategory("ProgressMessageIdData", categoryId),
+        SummaryMessageIdData: this.countRowsByCategory("SummaryMessageIdData", categoryId),
+      } as const;
+
+      this.summaryMessageIdRepository.deleteAllByCategory(categoryId);
+      this.progressMessageIdRepository.deleteAllByCategory(categoryId);
+      this.resourceAdjustmentRepository.deleteAllByCategory(categoryId);
+      this.playerResourceStateRepository.deleteAllByCategory(categoryId);
+      this.operationLogRepository.deleteAllByCategory(categoryId);
+      this.attackEntryRepository.deleteAllByCategory(categoryId);
+      this.attackStatusRepository.deleteAllByCategory(categoryId);
+      this.carryOverRepository.deleteAllByCategory(categoryId);
+      this.bossStatusRepository.deleteAllByCategory(categoryId);
+      this.playerRepository.deleteAllByCategory(categoryId);
+      this.clanRepository.delete(categoryId);
+
+      return counts;
+    });
+
+    this.delete(categoryId);
+
+    const remainingGuildCategoryCount = this.countClanRowsByGuild(clanData.guildId);
+    const result: OrphanedCategoryCleanupResult = {
+      categoryId,
+      guildId: clanData.guildId,
+      deletedCounts,
+      remainingGuildCategoryCount,
+      guildConfigDeleted: false,
+    };
+
+    this.logger.info("Orphaned category cleanup executed", { ...result });
+    return result;
+  }
+
+  getAttackEntries(categoryId: string): readonly AttackEntry[] {
+    return [...(this.attackEntriesByCategory.get(categoryId) ?? [])];
+  }
+
+  getOperationLogs(categoryId: string): readonly OperationLog[] {
+    return [...(this.operationLogsByCategory.get(categoryId) ?? [])];
+  }
+
+  getPlayerResourceStates(categoryId: string): readonly PlayerResourceState[] {
+    const userMap = this.playerResourceStateByCategory.get(categoryId);
+    if (!userMap) {
+      return [];
+    }
+
+    const states: PlayerResourceState[] = [];
+    for (const dayMap of userMap.values()) {
+      states.push(...dayMap.values());
+    }
+
+    return states;
+  }
+
+  getPlayerResourceState(
+    categoryId: string,
+    userId: string,
+    dayKey: string,
+  ): PlayerResourceState | undefined {
+    return this.playerResourceStateByCategory.get(categoryId)?.get(userId)?.get(dayKey);
+  }
+
+  syncProjectedStateForCategory(
+    categoryId: string,
+    currentDayKey: string = getClanBattleDayKeyFromClock(this.clock),
+    transitionAt: Date = now(this.clock),
+  ): ProjectedStateRefreshResult {
+    const result = this.projectionCoordinator.refreshCategory(
+      categoryId,
+      currentDayKey,
+      transitionAt,
+    );
+    this.attackEntriesByCategory.set(categoryId, result.attackEntries);
+    this.playerResourceStateByCategory.set(
+      categoryId,
+      this.projectionCoordinator.groupPlayerResourceStates(result.playerResourceStates),
+    );
+    this.operationLogsByCategory.set(categoryId, result.operationLogs);
+    return result;
+  }
+
   set(clanData: ClanData): void {
     this.clanDataByCategory.set(clanData.categoryId, clanData);
   }
 
   delete(categoryId: string): void {
     this.clanDataByCategory.delete(categoryId);
+    this.attackEntriesByCategory.delete(categoryId);
+    this.playerResourceStateByCategory.delete(categoryId);
+    this.operationLogsByCategory.delete(categoryId);
   }
 
   withCategoryLock<TResult>(
@@ -216,14 +478,13 @@ export class RuntimeStateService {
     }
 
     const deletedPendingAttackStatuses = this.removePendingAttackStatuses(clanData);
+    const transitionAt = now(clock);
 
-    runInTransaction(this.database, () => {
+    const projectedStateRefreshResult = runInTransaction(this.database, () => {
       for (const playerData of clanData.playerDataMap.values()) {
         this.playerRepository.update(categoryId, playerData);
         this.carryOverRepository.replaceAll(categoryId, playerData.userId, []);
       }
-
-      this.reserveRepository.deleteAllByCategory(categoryId);
 
       for (const pendingAttackStatus of deletedPendingAttackStatuses) {
         this.attackStatusRepository.delete(
@@ -234,14 +495,34 @@ export class RuntimeStateService {
         );
       }
 
+      this.summaryMessageIdRepository.deleteAllByCategory(categoryId);
       this.clanRepository.update(clanData);
+      return this.projectionCoordinator.pruneHistoricalStateAndRefreshCategory(
+        categoryId,
+        result.currentDayKey,
+        transitionAt,
+      );
     });
+
+    this.attackEntriesByCategory.set(categoryId, projectedStateRefreshResult.attackEntries);
+    this.playerResourceStateByCategory.set(
+      categoryId,
+      this.projectionCoordinator.groupPlayerResourceStates(
+        projectedStateRefreshResult.playerResourceStates,
+      ),
+    );
+    this.operationLogsByCategory.set(categoryId, projectedStateRefreshResult.operationLogs);
 
     this.logger.info("Clan battle day changed", {
       categoryId,
       previousDayKey: result.previousDayKey,
       currentDayKey: result.currentDayKey,
       deletedPendingAttackStatusCount: deletedPendingAttackStatuses.length,
+      prunedAttackEntryCount: projectedStateRefreshResult.prunedAttackEntryCount,
+      prunedOperationLogCount: projectedStateRefreshResult.prunedOperationLogCount,
+      prunedPlayerResourceStateCount: projectedStateRefreshResult.prunedPlayerResourceStateCount,
+      prunedResourceAdjustmentCount: projectedStateRefreshResult.prunedResourceAdjustmentCount,
+      expiredAttackEntryCount: projectedStateRefreshResult.expiredAttackEntryCount,
     });
 
     return result;
@@ -272,29 +553,69 @@ export class RuntimeStateService {
     return deletedPendingAttackStatuses;
   }
 
-  private cleanupLegacyReserveState(clanData: ClanData): boolean {
-    const reserveEntryCount = clanData.reserveList.reduce((sum, reserveList) => sum + reserveList.length, 0);
-    const reserveMessageCount = clanData.reserveMessageIds.filter((messageId) => messageId !== null).length;
+  private refreshProjectedRuntimeState(clanMap: ReadonlyMap<string, ClanData>): void {
+    const currentDayKey = getClanBattleDayKeyFromClock(this.clock);
+    const transitionAt = now(this.clock);
+    const attackEntriesByCategory = new Map<string, AttackEntry[]>();
+    const playerResourceStateByCategory = new Map<
+      string,
+      Map<string, Map<string, PlayerResourceState>>
+    >();
+    const operationLogsByCategory = new Map<string, OperationLog[]>();
+    let expiredAttackEntryCount = 0;
 
-    if (clanData.reserveChannelId === "0" && reserveEntryCount === 0 && reserveMessageCount === 0) {
-      return false;
-    }
-
-    const legacyReserveChannelId = clanData.reserveChannelId;
     runInTransaction(this.database, () => {
-      this.reserveRepository.deleteAllByCategory(clanData.categoryId);
-      clanData.retireLegacyReserve();
-      this.clanRepository.update(clanData);
+      for (const categoryId of clanMap.keys()) {
+        const result = this.projectionCoordinator.refreshCategory(
+          categoryId,
+          currentDayKey,
+          transitionAt,
+        );
+        attackEntriesByCategory.set(categoryId, result.attackEntries);
+        playerResourceStateByCategory.set(
+          categoryId,
+          this.projectionCoordinator.groupPlayerResourceStates(result.playerResourceStates),
+        );
+        operationLogsByCategory.set(categoryId, result.operationLogs);
+        expiredAttackEntryCount += result.expiredAttackEntryCount;
+      }
     });
 
-    this.logger.info("Cleaned up legacy reserve state during restore", {
-      categoryId: clanData.categoryId,
-      legacyReserveChannelId,
-      reserveEntryCount,
-      reserveMessageCount,
+    this.attackEntriesByCategory = attackEntriesByCategory;
+    this.playerResourceStateByCategory = playerResourceStateByCategory;
+    this.operationLogsByCategory = operationLogsByCategory;
+    this.logger.info("Projected attack state restored from SQLite", {
+      categoryCount: clanMap.size,
+      attackEntryCount: Array.from(attackEntriesByCategory.values()).reduce(
+        (count, attackEntries) => count + attackEntries.length,
+        0,
+      ),
+      playerResourceStateCount: Array.from(playerResourceStateByCategory.values()).reduce(
+        (count, userMap) =>
+          count +
+          Array.from(userMap.values()).reduce((dayCount, dayMap) => dayCount + dayMap.size, 0),
+        0,
+      ),
+      operationLogCount: Array.from(operationLogsByCategory.values()).reduce(
+        (count, operationLogs) => count + operationLogs.length,
+        0,
+      ),
+      expiredAttackEntryCount,
     });
+  }
 
-    return true;
+  private countRowsByCategory(tableName: string, categoryId: string): number {
+    const row = this.database
+      .prepare<[bigint], { count: bigint }>(`select count(*) as count from ${tableName} where category_id=?`)
+      .get(encodeSnowflake(categoryId));
+    return Number(row?.count ?? 0n);
+  }
+
+  private countClanRowsByGuild(guildId: string): number {
+    const row = this.database
+      .prepare<[bigint], { count: bigint }>("select count(*) as count from ClanData where guild_id=?")
+      .get(encodeSnowflake(guildId));
+    return Number(row?.count ?? 0n);
   }
 
   private getOrThrow(categoryId: string): ClanData {

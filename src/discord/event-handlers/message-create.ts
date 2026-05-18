@@ -1,8 +1,10 @@
 import type { Guild, Message } from "discord.js";
 
 import type { AttackService } from "../../services/attack-service.js";
+import type { RuntimeStateService } from "../../services/runtime-state-service.js";
 import {
   DiscordGuildTextGateway,
+  resolveGuildDisplayNamesForUserIds,
   resolvePreferredGuildMemberDisplayName,
   resolvePreferredUserDisplayName,
   resolveCachedGuildDisplayNames,
@@ -12,6 +14,7 @@ export type DiscordMessageCreateHandler = (message: Message) => Promise<void>;
 
 export interface MessageCreateHandlerOptions {
   attackService: Pick<AttackService, "applyMessageDamage">;
+  runtimeStateService: Pick<RuntimeStateService, "get">;
   createDiscordGateway?: (guild: Guild) => DiscordGuildTextGateway;
   resolveDisplayNames?: (guild: Guild) => Promise<ReadonlyMap<string, string>>;
 }
@@ -37,9 +40,12 @@ export function createMessageCreateHandler(
       return;
     }
 
+    const clanData = options.runtimeStateService.get(parentId);
     const displayNamesByUserId = new Map(
       await (options.resolveDisplayNames?.(message.guild) ??
-        Promise.resolve(resolveCachedGuildDisplayNames(message.guild))),
+        (clanData
+          ? resolveGuildDisplayNamesForUserIds(message.guild, clanData.playerDataMap.keys())
+          : Promise.resolve(resolveCachedGuildDisplayNames(message.guild)))),
     );
     displayNamesByUserId.set(message.author.id, getMessageAuthorDisplayName(message));
 

@@ -692,11 +692,20 @@ export function registerBossInfoCommandHandlers(
   router: InteractionRouter,
   options: BossInfoCommandHandlersOptions,
 ): void {
+  router.registerChatInputCommand("ボス情報閲覧", async (interaction) => {
+    await handleBossInfoShowCommand(interaction, options);
+  });
   router.registerChatInputCommand("bossinfo_show", async (interaction) => {
     await handleBossInfoShowCommand(interaction, options);
   });
+  router.registerChatInputCommand("ボス情報出力", async (interaction) => {
+    await handleBossInfoExportJsonCommand(interaction, options);
+  });
   router.registerChatInputCommand("bossinfo_export_json", async (interaction) => {
     await handleBossInfoExportJsonCommand(interaction, options);
+  });
+  router.registerChatInputCommand("ボス情報書き換え", async (interaction) => {
+    await handleBossInfoEditCommand(interaction, options);
   });
   router.registerChatInputCommand("bossinfo_edit", async (interaction) => {
     await handleBossInfoEditCommand(interaction, options);
