@@ -82,7 +82,7 @@ export class AttackStatus {
   }
 
   updateAttackLog(): void {
-    if (this.playerData.battleAttackCount >= 3) {
+    if (this.playerData.battleAttackCount >= this.playerData.battleAttackLimit) {
       return;
     }
 

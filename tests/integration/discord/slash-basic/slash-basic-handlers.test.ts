@@ -13,6 +13,8 @@
 } from "discord.js";
 import { describe, expect, it } from "vitest";
 
+import { ClanData } from "../../../../src/domain/clan-data.js";
+import { PlayerData } from "../../../../src/domain/player-data.js";
 import { registerMemberCommandHandlers } from "../../../../src/discord/command-handlers/member.js";
 import { registerQueryCommandHandlers } from "../../../../src/discord/command-handlers/query.js";
 import { registerSetupCommandHandlers } from "../../../../src/discord/command-handlers/setup.js";
@@ -49,8 +51,9 @@ class FakeMembersManager {
   constructor(
     private readonly membersById: Map<string, GuildMember>,
     private readonly allMembers: Collection<string, GuildMember>,
+    cachedMembers: ReadonlyMap<string, GuildMember> = membersById,
   ) {
-    this.cache = new Collection(Array.from(this.membersById.entries()));
+    this.cache = new Collection(Array.from(cachedMembers.entries()));
   }
 
   async fetch(
@@ -58,13 +61,18 @@ class FakeMembersManager {
   ): Promise<GuildMember | Collection<string, GuildMember>> {
     if (!input) {
       this.fetchAllCount += 1;
+      for (const [memberId, member] of this.allMembers.entries()) {
+        this.cache.set(memberId, member);
+      }
       return this.allMembers;
     }
 
     if (typeof input === "string") {
       const member = this.membersById.get(input);
       if (!member) {
-        throw new Error(`Unknown member: ${input}`);
+        const error = new Error(`Unknown member: ${input}`) as Error & { code: number };
+        error.code = 10_007;
+        throw error;
       }
 
       this.cache.set(member.id, member);
@@ -141,18 +149,23 @@ function createInteraction(options: {
   member?: GuildMember;
   channelId?: string;
   hasAdministratorPermission?: boolean;
+  buttonSelection?: "increase" | "decrease" | "cancel";
 }): {
   interaction: ChatInputCommandInteraction;
   replies: RecordedReply[];
+  deletedReplies: number[];
 } {
   const replies: RecordedReply[] = [];
+  const deletedReplies: number[] = [];
   const optionValues = options.optionValues ?? {};
   let replied = false;
   let deferred = false;
   let deferredEphemeral = false;
+  let confirmationCustomIds: string[] = [];
 
   const interaction = {
     commandName: options.commandName,
+    id: "interaction-1",
     guild: options.guild ?? null,
     guildId: options.guild?.id ?? null,
     channelId: options.channelId ?? "333333333333333333",
@@ -225,8 +238,15 @@ function createInteraction(options: {
       replied = true;
       replies.push(normalizeRecordedReply(payload));
     },
-    async editReply(payload: { content?: string }) {
+    async editReply(payload: {
+      content?: string;
+      components?: readonly { toJSON(): { components?: Array<{ custom_id?: string }> } }[];
+    }) {
       replied = true;
+      confirmationCustomIds =
+        payload.components?.flatMap(
+          (row) => row.toJSON().components?.flatMap((component) => component.custom_id ?? []) ?? [],
+        ) ?? [];
       replies.push(
         normalizeRecordedReply({
           content: payload.content,
@@ -237,9 +257,37 @@ function createInteraction(options: {
     async followUp(payload: { content?: string; ephemeral?: boolean; flags?: MessageFlags }) {
       replies.push(normalizeRecordedReply(payload));
     },
+    async fetchReply() {
+      return {
+        async awaitMessageComponent(collectorOptions: {
+          filter(interaction: { user: User; customId: string }): boolean;
+        }) {
+          const selectedSuffix = options.buttonSelection ?? "cancel";
+          const customId = confirmationCustomIds.find((candidate) =>
+            candidate.endsWith(`:${selectedSuffix}`),
+          );
+          if (!customId) {
+            throw new Error("Confirmation button was not rendered");
+          }
+
+          const buttonInteraction = {
+            user: interaction.user,
+            customId,
+            async deferUpdate() {},
+          };
+          if (!collectorOptions.filter(buttonInteraction)) {
+            throw new Error("Confirmation button was rejected by the collector");
+          }
+          return buttonInteraction;
+        },
+      };
+    },
+    async deleteReply() {
+      deletedReplies.push(1);
+    },
   } as unknown as ChatInputCommandInteraction;
 
-  return { interaction, replies };
+  return { interaction, replies, deletedReplies };
 }
 
 function createGuildFixture(): Guild {
@@ -270,6 +318,34 @@ function createGuildFixture(): Guild {
       new Collection(Array.from(guildMembersById.entries())),
     ),
   } as unknown as Guild;
+}
+
+function createManagedClanData(
+  guildId: string,
+  categoryId: string,
+  userIds: readonly string[],
+): ClanData {
+  const clanData = new ClanData({
+    guildId,
+    categoryId,
+    bossChannelIds: [
+      "101111111111111111",
+      "101111111111111112",
+      "101111111111111113",
+      "101111111111111114",
+      "101111111111111115",
+    ],
+    remainAttackChannelId: "101111111111111116",
+    commandChannelId: "101111111111111117",
+    summaryChannelId: "101111111111111118",
+    date: "2026-03-08",
+  });
+
+  for (const userId of userIds) {
+    clanData.addPlayerData(new PlayerData({ userId }));
+  }
+
+  return clanData;
 }
 
 describe("slash basic handlers", () => {
@@ -500,12 +576,214 @@ describe("slash basic handlers", () => {
         displayNameCount: 4,
       },
     ]);
-    expect((guild.members as unknown as FakeMembersManager).fetchAllCount).toBe(0);
+    expect((guild.members as unknown as FakeMembersManager).fetchAllCount).toBe(1);
     expect(addInteraction.replies).toEqual([{ content: "add ok", ephemeral: false }]);
     expect(removeInteraction.replies).toEqual([
       { content: "remove 1", ephemeral: false },
       { content: "remove 2", ephemeral: false },
     ]);
+  });
+
+  it("fetches uncached guild members before resolving /add role members", async () => {
+    const roleId = "999";
+    const invoker = createGuildMember("111111111111111111", "Invoker");
+    const cachedRoleMember = createGuildMember("222222222222222222", "Alice", [roleId]);
+    const uncachedRoleMember = createGuildMember("333333333333333333", "Bob", [roleId]);
+    const allMembersById = new Map<string, GuildMember>([
+      [invoker.id, invoker],
+      [cachedRoleMember.id, cachedRoleMember],
+      [uncachedRoleMember.id, uncachedRoleMember],
+    ]);
+    const membersManager = new FakeMembersManager(
+      allMembersById,
+      new Collection(Array.from(allMembersById.entries())),
+      new Map([
+        [invoker.id, invoker],
+        [cachedRoleMember.id, cachedRoleMember],
+      ]),
+    );
+    const guild = {
+      ...createGuildFixture(),
+      members: membersManager,
+    } as unknown as Guild;
+    const role = {
+      id: roleId,
+      members: new Collection([[cachedRoleMember.id, cachedRoleMember]]),
+    } as unknown as Role;
+    const addedRoleMemberIds: string[][] = [];
+    const router = new InteractionRouter({ logger: createMemoryLogger() });
+
+    registerMemberCommandHandlers(router, {
+      memberService: {
+        async add(request) {
+          addedRoleMemberIds.push(request.role?.members.map((member) => member.id) ?? []);
+          await request.responseChannel.send({ content: "add ok" });
+          return request.role?.members.length ?? 0;
+        },
+      },
+      runtimeStateService: {
+        get() {
+          return undefined;
+        },
+      },
+    });
+
+    const { interaction } = createInteraction({
+      commandName: "add",
+      guild,
+      optionValues: { role },
+    });
+    await router.handle(interaction);
+
+    expect(membersManager.fetchAllCount).toBe(1);
+    expect(addedRoleMemberIds).toEqual([
+      ["222222222222222222", "333333333333333333"],
+    ]);
+  });
+
+  it.each([
+    { selection: "increase" as const, expectedIncreaseCount: 1, expectedDecreaseCount: 0 },
+    { selection: "decrease" as const, expectedIncreaseCount: 0, expectedDecreaseCount: 1 },
+    { selection: "cancel" as const, expectedIncreaseCount: 0, expectedDecreaseCount: 0 },
+  ])(
+    "shows duplicate /add confirmation only to the invoker and deletes it after $selection",
+    async ({ selection, expectedIncreaseCount, expectedDecreaseCount }) => {
+      const guild = createGuildFixture();
+      const router = new InteractionRouter({ logger: createMemoryLogger() });
+      const memberUser = {
+        id: "444444444444444444",
+        username: "Carol",
+        globalName: "Carol",
+        displayName: "Carol",
+      } as User;
+      const clanData = createManagedClanData(guild.id, "999999999999999999", [memberUser.id]);
+      clanData.getPlayerData(memberUser.id)!.battleAttackLimit = 6;
+      let increaseCount = 0;
+      let decreaseCount = 0;
+
+      registerMemberCommandHandlers(router, {
+        memberService: {
+          async add() {
+            throw new Error("add should not be called for an existing explicit member");
+          },
+          async remove() {
+            return 0;
+          },
+          async increaseBattleAttackLimit() {
+            increaseCount += 1;
+            return 9;
+          },
+          async decreaseBattleAttackLimit() {
+            decreaseCount += 1;
+            return 3;
+          },
+        },
+        runtimeStateService: {
+          get() {
+            return clanData;
+          },
+          async ensureDateUpToDate() {
+            return {
+              changed: false,
+              previousDayKey: clanData.date,
+              currentDayKey: clanData.date,
+              shouldCreateRemainAttackMessage: false,
+            };
+          },
+          getPlayerResourceState() {
+            return undefined;
+          },
+        },
+      });
+
+      const addInteraction = createInteraction({
+        commandName: "add",
+        guild,
+        optionValues: { member: memberUser },
+        buttonSelection: selection,
+      });
+      await router.handle(addInteraction.interaction);
+
+      expect(addInteraction.replies).toHaveLength(1);
+      expect(addInteraction.replies[0]).toMatchObject({ ephemeral: true });
+      expect(addInteraction.replies[0]?.content).toContain(`<@${memberUser.id}>は6凸`);
+      expect(increaseCount).toBe(expectedIncreaseCount);
+      expect(decreaseCount).toBe(expectedDecreaseCount);
+      expect(addInteraction.deletedReplies).toHaveLength(1);
+    },
+  );
+
+  it("cleans departed managed users during day rollover before member commands", async () => {
+    const guild = createGuildFixture();
+    const router = new InteractionRouter({ logger: createMemoryLogger() });
+    const addRequests: Array<Record<string, unknown>> = [];
+    const removeRequests: Array<Record<string, unknown>> = [];
+    const clanData = createManagedClanData(guild.id, "999999999999999999", [
+      "222222222222222222",
+      "555555555555555555",
+    ]);
+
+    registerMemberCommandHandlers(router, {
+      memberService: {
+        async add(request) {
+          addRequests.push({
+            categoryId: request.categoryId,
+            actorId: request.actor.id,
+          });
+          await request.responseChannel.send({ content: "add ok" });
+          return 1;
+        },
+        async remove(request) {
+          removeRequests.push({
+            categoryId: request.categoryId,
+            actorId: request.actor.id,
+            memberId: request.member?.id,
+            memberDisplayName: request.member?.displayName,
+            displayName: request.displayNamesByUserId?.get("555555555555555555"),
+          });
+          if (request.member) {
+            clanData.playerDataMap.delete(request.member.id);
+          }
+          return 1;
+        },
+      },
+      runtimeStateService: {
+        get() {
+          return clanData;
+        },
+        async ensureDateUpToDate() {
+          return {
+            changed: true,
+            previousDayKey: "2026-03-07",
+            currentDayKey: "2026-03-08",
+            shouldCreateRemainAttackMessage: true,
+          };
+        },
+      },
+    });
+
+    const addInteraction = createInteraction({
+      commandName: "add",
+      guild,
+    });
+    await router.handle(addInteraction.interaction);
+
+    expect(removeRequests).toEqual([
+      {
+        categoryId: "999999999999999999",
+        actorId: "555555555555555555",
+        memberId: "555555555555555555",
+        memberDisplayName: "555555555555555555",
+        displayName: "555555555555555555",
+      },
+    ]);
+    expect(addRequests).toEqual([
+      {
+        categoryId: "999999999999999999",
+        actorId: "111111111111111111",
+      },
+    ]);
+    expect(addInteraction.replies).toEqual([{ content: "add ok", ephemeral: false }]);
   });
 
   it("maps /蜻ｨ蝗樊焚螟画峩, /time and /谿句・菫ｮ豁｣ to ClanQueryService with public replies", async () => {
@@ -553,6 +831,11 @@ describe("slash basic handlers", () => {
           });
           await request.responseChannel.send({ content: "adjust ok" });
           return true;
+        },
+      },
+      memberService: {
+        async remove() {
+          throw new Error("remove should not be called");
         },
       },
       runtimeStateService: {

@@ -25,6 +25,7 @@ describe("PlayerData", () => {
   it("resets attack progress and transient state", () => {
     const playerData = new PlayerData({
       userId: "user-1",
+      battleAttackLimit: 6,
       physicsAttack: 1,
       magicAttack: 2,
       carryOverList: [new CarryOver({ attackType: AttackType.BATTLE, bossIndex: 0 })],
@@ -41,6 +42,18 @@ describe("PlayerData", () => {
     expect(playerData.carryOverList).toEqual([]);
     expect(playerData.taskKill).toBe(false);
     expect(playerData.rawLimitTimeText).toBe("");
+    expect(playerData.battleAttackLimit).toBe(6);
+  });
+
+  it("uses the persistent per-member battle attack limit", () => {
+    const playerData = new PlayerData({ userId: "user-1", battleAttackLimit: 6 });
+
+    for (let index = 0; index < 7; index += 1) {
+      playerData.incrementBattleAttackCount();
+    }
+
+    expect(playerData.battleAttackCount).toBe(6);
+    expect(playerData.toRecord().battleAttackLimit).toBe(6);
   });
 
   it("creates snapshots compatible with later restore", () => {

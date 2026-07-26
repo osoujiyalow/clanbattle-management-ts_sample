@@ -15,6 +15,8 @@ import type { PlayerData } from "../domain/player-data.js";
 import { PlayerResourceState } from "../domain/player-resource-state.js";
 import { ResourceAdjustment, ResourceAdjustmentType } from "../domain/resource-adjustment.js";
 import { AttackType } from "../domain/attack-type.js";
+import { OperationLog, OperationLogType } from "../domain/operation-log.js";
+import { OperationType } from "../domain/operation-type.js";
 import { calcCarryOverTime } from "../domain/util/carry-over.js";
 import { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import { AttackStatusRepository } from "../repositories/sqlite/attack-status-repository.js";
@@ -28,7 +30,6 @@ import { ClanRepository } from "../repositories/sqlite/clan-repository.js";
 import { runInTransaction, type SqliteDatabase } from "../repositories/sqlite/db.js";
 import { OperationLogRepository } from "../repositories/sqlite/operation-log-repository.js";
 import { PlayerRepository } from "../repositories/sqlite/player-repository.js";
-import { PlayerResourceStateRepository } from "../repositories/sqlite/player-resource-state-repository.js";
 import { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
 import type { ClanBattleDayGuardResult } from "../shared/date-guard.js";
 import type { Logger } from "../shared/logger.js";
@@ -133,7 +134,6 @@ export interface ClanQueryServiceOptions {
   clanRepository?: ClanRepository;
   playerRepository?: PlayerRepository;
   attackEntryRepository?: AttackEntryRepository;
-  playerResourceStateRepository?: PlayerResourceStateRepository;
   operationLogRepository?: OperationLogRepository;
   resourceAdjustmentRepository?: ResourceAdjustmentRepository;
   attackStatusRepository?: AttackStatusRepository;
@@ -150,7 +150,6 @@ export class ClanQueryService {
   private readonly clanRepository: ClanRepository;
   private readonly playerRepository: PlayerRepository;
   private readonly attackEntryRepository: AttackEntryRepository;
-  private readonly playerResourceStateRepository: PlayerResourceStateRepository;
   private readonly operationLogRepository: OperationLogRepository;
   private readonly resourceAdjustmentRepository: ResourceAdjustmentRepository;
   private readonly attackStatusRepository: AttackStatusRepository;
@@ -166,8 +165,6 @@ export class ClanQueryService {
     this.playerRepository = options.playerRepository ?? new PlayerRepository(options.database);
     this.attackEntryRepository =
       options.attackEntryRepository ?? new AttackEntryRepository(options.database);
-    this.playerResourceStateRepository =
-      options.playerResourceStateRepository ?? new PlayerResourceStateRepository(options.database);
     this.operationLogRepository =
       options.operationLogRepository ?? new OperationLogRepository(options.database);
     this.resourceAdjustmentRepository =
@@ -349,7 +346,7 @@ export class ClanQueryService {
 
       if (
         request.type === ResourceAdjustmentType.BATTLE &&
-        currentState.battleReservedCount > 3 - request.remaining
+        currentState.battleReservedCount > playerData.battleAttackLimit - request.remaining
       ) {
         await request.responseChannel.send({
           content: "未確定の本戦宣言があるため、その残数にはできません。",
@@ -416,10 +413,7 @@ export class ClanQueryService {
     runInTransaction(this.options.database, () => {
       this.bossStatusRepository.deleteAllByCategory(clanData.categoryId);
       this.attackStatusRepository.deleteAllByCategory(clanData.categoryId);
-      this.attackEntryRepository.deleteAllByCategory(clanData.categoryId);
-      this.operationLogRepository.deleteAllByCategory(clanData.categoryId);
-      this.resourceAdjustmentRepository.deleteAllByCategory(clanData.categoryId);
-      this.playerResourceStateRepository.deleteAllByCategory(clanData.categoryId);
+      this.expireDeclaredAttackEntries(clanData, transitionAt);
       this.progressMessageIdRepository.deleteAllByCategory(clanData.categoryId);
       this.summaryMessageIdRepository.deleteAllByCategory(clanData.categoryId);
     });
@@ -442,7 +436,8 @@ export class ClanQueryService {
       clanData.date,
       transitionAt,
     );
-    this.resetLegacyPlayerState(clanData);
+    this.removeLegacyDeclarationLogs(clanData);
+    this.reconcileLegacyPlayerStateAfterProjectionReset(clanData);
     this.persistPlayerState(clanData);
 
     for (let bossIndex = 0; bossIndex < clanData.bossChannelIds.length; bossIndex += 1) {
@@ -483,6 +478,7 @@ export class ClanQueryService {
         );
       }
     }
+    this.clearProgressTrackingAboveLap(clanData, lap, bossIndex);
 
     const initializedProgressRow = this.ensureProgressRow(clanData, lap);
     const initializedBossStatusLap = this.ensureBossStatusLap(clanData, lap);
@@ -491,8 +487,7 @@ export class ClanQueryService {
     runInTransaction(this.options.database, () => {
       this.bossStatusRepository.deleteByBossIndex(clanData.categoryId, bossIndex);
       this.attackStatusRepository.deleteByBossIndex(clanData.categoryId, bossIndex);
-      this.attackEntryRepository.deleteAllByBossIndex(clanData.categoryId, bossIndex);
-      this.operationLogRepository.deleteAllByBossIndex(clanData.categoryId, bossIndex);
+      this.expireDeclaredAttackEntries(clanData, transitionAt, bossIndex);
       if (initializedProgressRow) {
         this.progressMessageIdRepository.insert(
           clanData.categoryId,
@@ -503,6 +498,11 @@ export class ClanQueryService {
 
       if (initializedBossStatusLap) {
         this.bossStatusRepository.insertAllForLap(clanData.categoryId, clanData.bossStatusByLap.get(lap)!);
+      } else {
+        this.bossStatusRepository.insert(
+          clanData.categoryId,
+          clanData.bossStatusByLap.get(lap)![bossIndex]!,
+        );
       }
     });
     this.options.runtimeStateService.syncProjectedStateForCategory(
@@ -510,7 +510,7 @@ export class ClanQueryService {
       clanData.date,
       transitionAt,
     );
-    this.trimLegacyLogsForBoss(clanData, bossIndex);
+    this.removeLegacyDeclarationLogs(clanData, bossIndex);
     this.reconcileLegacyPlayerStateAfterProjectionReset(clanData);
     this.persistPlayerState(clanData);
 
@@ -548,15 +548,70 @@ export class ClanQueryService {
     }
   }
 
-  private trimLegacyLogsForBoss(clanData: ClanData, bossIndex: number): void {
+  private removeLegacyDeclarationLogs(clanData: ClanData, bossIndex?: number): void {
     for (const playerData of clanData.playerDataMap.values()) {
-      playerData.log = playerData.log.filter((logData) => logData.bossIndex !== bossIndex);
+      playerData.log = playerData.log.filter(
+        (logData) =>
+          logData.operationType !== OperationType.ATTACK_DECLAR ||
+          (bossIndex !== undefined && logData.bossIndex !== bossIndex),
+      );
     }
   }
 
-  private resetLegacyPlayerState(clanData: ClanData): void {
-    for (const playerData of clanData.playerDataMap.values()) {
-      playerData.initializeAttack();
+  private clearProgressTrackingAboveLap(
+    clanData: ClanData,
+    targetLap: number,
+    bossIndex: number,
+  ): void {
+    for (const [trackedLap, progressMessageIds] of clanData.progressMessageIdsByLap.entries()) {
+      if (trackedLap <= targetLap || !progressMessageIds[bossIndex]) {
+        continue;
+      }
+
+      progressMessageIds[bossIndex] = null;
+      this.progressMessageIdRepository.update(
+        clanData.categoryId,
+        trackedLap,
+        progressMessageIds,
+      );
+    }
+  }
+
+  private expireDeclaredAttackEntries(
+    clanData: ClanData,
+    transitionAt: Date,
+    bossIndex?: number,
+  ): void {
+    const declaredAttackEntries = this.attackEntryRepository
+      .findAllByCategory(clanData.categoryId)
+      .filter(
+        (attackEntry) =>
+          attackEntry.dayKey === clanData.date &&
+          attackEntry.status === AttackEntryStatus.DECLARED &&
+          (bossIndex === undefined || attackEntry.bossIndex === bossIndex),
+      );
+
+    for (const attackEntry of declaredAttackEntries) {
+      attackEntry.status = AttackEntryStatus.EXPIRED;
+      attackEntry.resolvedAt = transitionAt;
+      this.attackEntryRepository.update(attackEntry);
+      this.operationLogRepository.insert(
+        new OperationLog({
+          operationId: randomUUID(),
+          categoryId: attackEntry.categoryId,
+          userId: attackEntry.userId,
+          dayKey: attackEntry.dayKey,
+          lap: attackEntry.lap,
+          bossIndex: attackEntry.bossIndex,
+          targetAttackEntryId: attackEntry.attackEntryId,
+          operationType: OperationLogType.EXPIRE,
+          beforeKind: attackEntry.kind,
+          afterKind: attackEntry.kind,
+          beforeStatus: AttackEntryStatus.DECLARED,
+          afterStatus: AttackEntryStatus.EXPIRED,
+          occurredAt: transitionAt,
+        }),
+      );
     }
   }
 

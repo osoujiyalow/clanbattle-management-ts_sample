@@ -12,7 +12,10 @@ import { ClanData } from "../../../../src/domain/clan-data.js";
 import { OperationLog, OperationLogType } from "../../../../src/domain/operation-log.js";
 import { PlayerData } from "../../../../src/domain/player-data.js";
 import { PlayerResourceState } from "../../../../src/domain/player-resource-state.js";
-import { ResourceAdjustmentType } from "../../../../src/domain/resource-adjustment.js";
+import {
+  ResourceAdjustment,
+  ResourceAdjustmentType,
+} from "../../../../src/domain/resource-adjustment.js";
 import { AttackEntryRepository } from "../../../../src/repositories/sqlite/attack-entry-repository.js";
 import {
   closeSqliteDatabase,
@@ -29,6 +32,7 @@ import { ClanRepository } from "../../../../src/repositories/sqlite/clan-reposit
 import { OperationLogRepository } from "../../../../src/repositories/sqlite/operation-log-repository.js";
 import { PlayerRepository } from "../../../../src/repositories/sqlite/player-repository.js";
 import { PlayerResourceStateRepository } from "../../../../src/repositories/sqlite/player-resource-state-repository.js";
+import { ResourceAdjustmentRepository } from "../../../../src/repositories/sqlite/resource-adjustment-repository.js";
 import {
   ClanQueryService,
   type ClanQueryDiscordGateway,
@@ -190,7 +194,7 @@ describe("ClanQueryService", () => {
     tempPath = undefined;
   });
 
-  it("resets all progress to the requested lap and reuses the current summary message", async () => {
+  it("resets all boss progress while preserving resolved attacks and resource consumption", async () => {
     tempPath = createTempSqlitePath();
     database = openSqliteDatabase({ filePath: tempPath.filePath });
     createCoreRepositorySchema(database);
@@ -259,6 +263,18 @@ describe("ClanQueryService", () => {
         carryReservedCount: 0,
       }),
     );
+    new ResourceAdjustmentRepository(database).insert(
+      new ResourceAdjustment({
+        adjustmentId: "adjustment-1",
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        actorUserId: "444",
+        dayKey: clanData.date,
+        resourceType: ResourceAdjustmentType.BATTLE,
+        remaining: 2,
+        occurredAt: new Date("2026-03-08T00:02:00+09:00"),
+      }),
+    );
     runtimeStateService.set(clanData);
 
     const nextId = createSnowflakeFactory();
@@ -312,15 +328,19 @@ describe("ClanQueryService", () => {
     const playerResourceStateRow = database
       .prepare<[], { count: bigint }>("select count(*) as count from PlayerResourceState")
       .get();
+    const resourceAdjustmentRow = database
+      .prepare<[], { count: bigint }>("select count(*) as count from ResourceAdjustmentLog")
+      .get();
 
     expect(result).toBe(true);
     expect(responseChannel.sentPayloads).toEqual([
       { content: "\u5468\u56de\u6570\u30923\u306b\u8a2d\u5b9a\u3057\u307e\u3059" },
     ]);
     expect(attackRow?.count).toBe(0n);
-    expect(attackEntryRow?.count).toBe(0n);
-    expect(operationLogRow?.count).toBe(0n);
-    expect(playerResourceStateRow?.count).toBe(0n);
+    expect(attackEntryRow?.count).toBe(1n);
+    expect(operationLogRow?.count).toBe(1n);
+    expect(playerResourceStateRow?.count).toBe(1n);
+    expect(resourceAdjustmentRow?.count).toBe(1n);
     expect(bossStatusRow?.count).toBe(5n);
     expect(bossStatusRow?.min_lap).toBe(3n);
     expect(bossStatusRow?.max_lap).toBe(3n);
@@ -336,7 +356,7 @@ describe("ClanQueryService", () => {
     expect(clanData.summaryMessageIdsByLap.has(3)).toBe(true);
     expect(clanData.bossStatusByLap.size).toBe(1);
     expect(clanData.bossStatusByLap.has(3)).toBe(true);
-    expect(playerData.battleAttackCount).toBe(0);
+    expect(playerData.battleAttackCount).toBe(1);
     expect(playerData.carryOverList).toHaveLength(0);
     expect(playerData.log).toHaveLength(0);
     expect(summaryChannel.sentMessages).toHaveLength(0);
@@ -351,7 +371,7 @@ describe("ClanQueryService", () => {
     }
   });
 
-  it("resets only one boss progress to a target lap and retargets the current summary row", async () => {
+  it("resets only one boss progress while preserving resolved attacks and resource consumption", async () => {
     tempPath = createTempSqlitePath();
     database = openSqliteDatabase({ filePath: tempPath.filePath });
     createCoreRepositorySchema(database);
@@ -397,6 +417,33 @@ describe("ClanQueryService", () => {
         damage: 222222,
       }),
     );
+    const declaredAttackStatus = new AttackStatus({
+      playerData,
+      attackType: AttackType.BATTLE,
+      carryOver: false,
+      attacked: false,
+      created: new Date("2026-03-08T00:04:00+09:00"),
+    });
+    clanData.bossStatusByLap.get(1)![0]!.attackPlayers.push(declaredAttackStatus);
+    new AttackStatusRepository(database).insert(
+      clanData.categoryId,
+      1,
+      0,
+      declaredAttackStatus,
+    );
+    new AttackEntryRepository(database).insert(
+      new AttackEntry({
+        attackEntryId: "declared-boss1",
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        dayKey: clanData.date,
+        lap: 1,
+        bossIndex: 0,
+        kind: AttackEntryKind.BATTLE,
+        status: AttackEntryStatus.DECLARED,
+        declaredAt: new Date("2026-03-08T00:04:00+09:00"),
+      }),
+    );
     new OperationLogRepository(database).insert(
       new OperationLog({
         operationId: "operation-boss1",
@@ -436,7 +483,7 @@ describe("ClanQueryService", () => {
         categoryId: clanData.categoryId,
         userId: playerData.userId,
         dayKey: clanData.date,
-        battleReservedCount: 0,
+        battleReservedCount: 1,
         battleConsumedCount: 2,
         carryAvailableCount: 0,
         carryReservedCount: 0,
@@ -485,15 +532,28 @@ describe("ClanQueryService", () => {
       .prepare<[], { count: bigint }>("select count(*) as count from BossStatusData")
       .get();
     const attackEntryRows = database
-      .prepare<[], { attack_entry_id: string; boss_index: bigint }>(
-        "select attack_entry_id, boss_index from AttackEntry order by attack_entry_id asc",
+      .prepare<[], { attack_entry_id: string; boss_index: bigint; status: string }>(
+        "select attack_entry_id, boss_index, status from AttackEntry order by attack_entry_id asc",
       )
       .all();
     const operationLogRows = database
-      .prepare<[], { operation_id: string; boss_index: bigint }>(
-        "select operation_id, boss_index from OperationLog order by operation_id asc",
+      .prepare<
+        [],
+        {
+          operation_id: string;
+          boss_index: bigint;
+          operation_type: string;
+          target_attack_entry_id: string;
+        }
+      >(
+        "select operation_id, boss_index, operation_type, target_attack_entry_id from OperationLog order by operation_id asc",
       )
       .all();
+    const attackStatusCount = database
+      .prepare<[], { count: bigint }>(
+        "select count(*) as count from AttackStatus where boss_index=0",
+      )
+      .get();
 
     expect(result).toBe(true);
     expect(responseChannel.sentPayloads).toEqual([
@@ -510,22 +570,135 @@ describe("ClanQueryService", () => {
     expect(bossStatusCount?.count).toBe(9n);
     expect(attackEntryRows).toEqual([
       {
+        attack_entry_id: "attack-boss1",
+        boss_index: 0n,
+        status: AttackEntryStatus.FINISHED,
+      },
+      {
         attack_entry_id: "attack-boss2",
         boss_index: 1n,
+        status: AttackEntryStatus.FINISHED,
       },
-    ]);
-    expect(operationLogRows).toEqual([
       {
-        operation_id: "operation-boss2",
-        boss_index: 1n,
+        attack_entry_id: "declared-boss1",
+        boss_index: 0n,
+        status: AttackEntryStatus.EXPIRED,
       },
     ]);
+    expect(operationLogRows).toHaveLength(3);
+    expect(operationLogRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation_id: "operation-boss1",
+          boss_index: 0n,
+        }),
+        expect.objectContaining({
+          operation_id: "operation-boss2",
+          boss_index: 1n,
+        }),
+        expect.objectContaining({
+          boss_index: 0n,
+          operation_type: OperationLogType.EXPIRE,
+          target_attack_entry_id: "declared-boss1",
+        }),
+      ]),
+    );
+    expect(attackStatusCount?.count).toBe(0n);
     expect(clanData.progressMessageIdsByLap.get(1)?.[0]).toBeNull();
     expect(clanData.progressMessageIdsByLap.get(2)?.[0]).toBe(bossChannel.sentMessages[0]?.id);
     expect(clanData.summaryMessageIdsByLap.get(2)?.[0]).toBe(summaryMessage.id);
-    expect(playerData.battleAttackCount).toBe(1);
-    expect(remainChannel.messages.get(clanData.remainAttackMessageId!)?.edits).toHaveLength(1);
-    expect(remainChannel.messages.get(clanData.remainAttackMessageId!)?.edits[0]?.components).toEqual([]);
+    expect(playerData.battleAttackCount).toBe(2);
+
+    const adjustmentResult = await service.adjustRemainAttackCount({
+      categoryId: clanData.categoryId,
+      channelId: clanData.commandChannelId,
+      actor: { id: "444", displayName: "Manager" },
+      member: { id: playerData.userId, displayName: "Alice" },
+      type: ResourceAdjustmentType.BATTLE,
+      remaining: 0,
+      responseChannel,
+      discordGateway: gateway,
+      displayNamesByUserId: new Map([[playerData.userId, "Alice"]]),
+    });
+    const resourceAdjustmentCount = database
+      .prepare<[], { count: bigint }>("select count(*) as count from ResourceAdjustmentLog")
+      .get();
+
+    expect(adjustmentResult).toBe(true);
+    expect(resourceAdjustmentCount?.count).toBe(1n);
+    expect(playerData.battleAttackCount).toBe(3);
+    expect(remainChannel.messages.get(clanData.remainAttackMessageId!)?.edits).toHaveLength(2);
+    expect(remainChannel.messages.get(clanData.remainAttackMessageId!)?.edits[1]?.components).toEqual([]);
+  });
+
+  it("makes a multi-lap single-boss rollback the current lap used by the summary", async () => {
+    tempPath = createTempSqlitePath();
+    database = openSqliteDatabase({ filePath: tempPath.filePath });
+    createCoreRepositorySchema(database);
+
+    const runtimeStateService = new RuntimeStateService({ database });
+    const service = new ClanQueryService({
+      database,
+      runtimeStateService,
+      clock: createFixedClock("2026-03-08T06:00:00+09:00"),
+    });
+
+    const clanData = createClanData();
+    seedLap(database, clanData, 1);
+    clanData.initializeBossStatusData(2);
+    clanData.progressMessageIdsByLap.set(2, ["121", "122", "123", "124", "125"]);
+    seedLap(database, clanData, 2);
+    clanData.initializeBossStatusData(3);
+    clanData.progressMessageIdsByLap.set(3, ["131", "132", "133", "134", "135"]);
+    seedLap(database, clanData, 3);
+    runtimeStateService.set(clanData);
+
+    const nextId = createSnowflakeFactory();
+    const responseChannel = new FakeTextChannel("response", nextId);
+    const bossChannel = new FakeTextChannel(clanData.bossChannelIds[0]!, nextId);
+    bossChannel.attachMessage(new FakeMessage("111"));
+    bossChannel.attachMessage(new FakeMessage("131"));
+    const remainChannel = new FakeTextChannel(clanData.remainAttackChannelId, nextId);
+    remainChannel.attachMessage(new FakeMessage(clanData.remainAttackMessageId!));
+    const summaryChannel = new FakeTextChannel(clanData.summaryChannelId, nextId);
+    const summaryMessage = new FakeMessage("211");
+    summaryChannel.attachMessage(summaryMessage);
+    const gateway = new FakeDiscordGateway();
+    gateway.registerChannel(bossChannel);
+    gateway.registerChannel(remainChannel);
+    gateway.registerChannel(summaryChannel);
+
+    const result = await service.setLap({
+      categoryId: clanData.categoryId,
+      channelId: clanData.commandChannelId,
+      lap: 1,
+      bossNumber: 1,
+      responseChannel,
+      discordGateway: gateway,
+    });
+
+    const progressRows = database
+      .prepare<[], { lap: bigint; boss1: bigint | null }>(
+        "select lap, boss1 from ProgressMessageIdData order by lap asc",
+      )
+      .all();
+    const bossStatusRows = database
+      .prepare<[], { lap: bigint }>(
+        "select lap from BossStatusData where boss_index=0 order by lap asc",
+      )
+      .all();
+
+    expect(result).toBe(true);
+    expect(clanData.getLatestLap(0)).toBe(1);
+    expect(clanData.progressMessageIdsByLap.get(2)?.[0]).toBeNull();
+    expect(clanData.progressMessageIdsByLap.get(3)?.[0]).toBeNull();
+    expect(progressRows).toEqual([
+      { lap: 1n, boss1: BigInt(bossChannel.sentMessages[0]!.id) },
+      { lap: 2n, boss1: null },
+      { lap: 3n, boss1: null },
+    ]);
+    expect(bossStatusRows).toEqual([{ lap: 1n }]);
+    expect(summaryMessage.edits).toHaveLength(1);
   });
 
   it("creates a new remain-attack message on day rollover before set_lap", async () => {

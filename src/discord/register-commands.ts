@@ -130,6 +130,11 @@ export const SLASH_COMMAND_PAYLOADS = [
   },
   {
     type: ApplicationCommandType.ChatInput,
+    name: "agent",
+    description: COMMAND_DESCRIPTIONS.agent,
+  },
+  {
+    type: ApplicationCommandType.ChatInput,
     name: "attack_declare",
     description: COMMAND_DESCRIPTIONS.attackDeclare,
     options: [

@@ -1,6 +1,8 @@
 import { pathToFileURL } from "node:url";
 
 import { createRuntimeConfig } from "./config/runtime.js";
+import { ActiveAttackerRoleSyncService } from "./discord/active-attacker-role-sync.js";
+import { registerAgentCommandHandlers } from "./discord/command-handlers/agent.js";
 import { registerAttackCommandHandlers } from "./discord/command-handlers/attack.js";
 import { registerBossInfoCommandHandlers } from "./discord/command-handlers/bossinfo.js";
 import { registerMemberCommandHandlers } from "./discord/command-handlers/member.js";
@@ -61,6 +63,11 @@ export async function bootstrap(): Promise<void> {
   }
 
   runtimeStateService.restoreFromDatabase();
+  const activeAttackerRoleSyncService = new ActiveAttackerRoleSyncService({
+    database,
+    runtimeStateService,
+    logger,
+  });
 
   const router = new InteractionRouter({
     logger,
@@ -101,6 +108,11 @@ export async function bootstrap(): Promise<void> {
   });
   registerQueryCommandHandlers(router, {
     clanQueryService,
+    memberService,
+    runtimeStateService,
+  });
+  registerAgentCommandHandlers(router, {
+    attackService,
     runtimeStateService,
   });
   registerAttackCommandHandlers(router, {
@@ -117,6 +129,7 @@ export async function bootstrap(): Promise<void> {
     logger,
     router,
     onReady: async (client) => {
+      activeAttackerRoleSyncService.bindClient(client);
       const scanReport = await runtimeStateService.scanOrphanedCategories(
         createDiscordOrphanedCategoryScanClassifier(client),
       );
@@ -130,6 +143,7 @@ export async function bootstrap(): Promise<void> {
     },
     onMessageCreate: createMessageCreateHandler({
       attackService,
+      memberService,
       runtimeStateService,
     }),
     onReactionAdd: createReactionAddHandler({

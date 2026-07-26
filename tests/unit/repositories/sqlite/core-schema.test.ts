@@ -101,6 +101,7 @@ describe("ensureCoreSchema", () => {
       .map((row) => row.name);
 
     expect(tableNames).toEqual([
+      "ActiveAttackerRoleConfig",
       "AttackEntry",
       "AttackStatus",
       "BossStatusData",
@@ -156,6 +157,7 @@ describe("ensureCoreSchema", () => {
       "physics_attack",
       "magic_attack",
       "battle_attack_count",
+      "battle_attack_limit",
       "task_kill",
     ]);
     expect(carryOverColumns).toEqual([

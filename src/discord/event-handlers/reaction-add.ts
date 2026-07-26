@@ -10,6 +10,7 @@ import { EMOJIS } from "../../constants/emojis.js";
 import type { AttackService } from "../../services/attack-service.js";
 import type { MemberService } from "../../services/member-service.js";
 import type { RuntimeStateService } from "../../services/runtime-state-service.js";
+import { cleanupDepartedMembersOnDateRollover } from "../day-rollover-departed-member-cleanup.js";
 import {
   DiscordGuildTextGateway,
   resolveGuildDisplayNamesForUserIds,
@@ -30,7 +31,8 @@ export interface ReactionAddHandlerOptions {
     AttackService,
     "declare" | "finish" | "defeatBoss" | "undo"
   >;
-  memberService: Pick<MemberService, "ensureCurrentRemainAttackMessage" | "setTaskKill">;
+  memberService: Pick<MemberService, "ensureCurrentRemainAttackMessage" | "setTaskKill"> &
+    Partial<Pick<MemberService, "remove">>;
   createDiscordGateway?: (guild: Guild) => DiscordGuildTextGateway;
   resolveDisplayNames?: (guild: Guild) => Promise<ReadonlyMap<string, string>>;
 }
@@ -84,7 +86,22 @@ export function createReactionAddHandler(options: ReactionAddHandlerOptions): Di
       return;
     }
 
-    await options.runtimeStateService.ensureDateUpToDate(parentId);
+    const discordGateway =
+      options.createDiscordGateway?.(guild) ?? new DiscordGuildTextGateway(guild);
+    if (options.memberService.remove) {
+      await cleanupDepartedMembersOnDateRollover({
+        runtimeStateService: options.runtimeStateService,
+        memberService: {
+          remove: (request) => options.memberService.remove!(request),
+        },
+        guild,
+        categoryId: parentId,
+        discordGateway,
+        ...(options.resolveDisplayNames ? { resolveDisplayNames: options.resolveDisplayNames } : {}),
+      });
+    } else {
+      await options.runtimeStateService.ensureDateUpToDate(parentId);
+    }
 
     const clanData = options.runtimeStateService.get(parentId);
     if (!clanData) {
@@ -100,8 +117,6 @@ export function createReactionAddHandler(options: ReactionAddHandlerOptions): Di
       id: user.id,
       displayName: getUserDisplayName(user, displayNamesByUserId),
     };
-    const discordGateway =
-      options.createDiscordGateway?.(guild) ?? new DiscordGuildTextGateway(guild);
     await options.memberService.ensureCurrentRemainAttackMessage({
       categoryId: parentId,
       member,

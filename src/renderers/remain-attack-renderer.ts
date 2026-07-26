@@ -90,7 +90,7 @@ export function renderRemainAttackEmbed(input: RemainAttackRendererInput): Embed
     const displayName = input.displayNamesByUserId.get(playerData.userId) ?? playerData.userId;
     const text = playerData.taskKill ? `- ${displayName} ${EMOJIS.taskKill}` : `- ${displayName}`;
     const attackCount = playerData.battleAttackCount;
-    const remainingAttackCount = 3 - attackCount;
+    const remainingAttackCount = playerData.battleAttackLimit - attackCount;
     const carryOverCount = playerData.carryOverList.length;
     const bucketKey = `${remainingAttackCount}:${carryOverCount}`;
     const bucket = bucketMap.get(bucketKey) ?? {

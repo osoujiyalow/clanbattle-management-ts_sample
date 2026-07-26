@@ -1,4 +1,5 @@
 import type {
+  AnySelectMenuInteraction,
   BaseInteraction,
   ButtonInteraction,
   ChatInputCommandInteraction,
@@ -12,6 +13,7 @@ import type { Logger } from "../shared/logger.js";
 type ButtonHandler = (interaction: ButtonInteraction) => Promise<void> | void;
 type ChatInputHandler = (interaction: ChatInputCommandInteraction) => Promise<void> | void;
 type ModalHandler = (interaction: ModalSubmitInteraction) => Promise<void> | void;
+type SelectMenuHandler = (interaction: AnySelectMenuInteraction) => Promise<void> | void;
 type CustomIdMatcher = RegExp | string | ((customId: string) => boolean);
 
 interface CustomIdRoute<TInteraction> {
@@ -68,6 +70,7 @@ async function replyWithGenericError(
 export class InteractionRouter {
   private readonly chatInputHandlers = new Map<string, ChatInputHandler>();
   private readonly buttonHandlers: CustomIdRoute<ButtonInteraction>[] = [];
+  private readonly selectMenuHandlers: CustomIdRoute<AnySelectMenuInteraction>[] = [];
   private readonly modalHandlers: CustomIdRoute<ModalSubmitInteraction>[] = [];
 
   constructor(private readonly options: InteractionRouterOptions) {}
@@ -79,6 +82,11 @@ export class InteractionRouter {
 
   registerButtonHandler(matcher: CustomIdMatcher, handler: ButtonHandler): this {
     this.buttonHandlers.push({ matcher, handler });
+    return this;
+  }
+
+  registerSelectMenuHandler(matcher: CustomIdMatcher, handler: SelectMenuHandler): this {
+    this.selectMenuHandlers.push({ matcher, handler });
     return this;
   }
 
@@ -99,6 +107,11 @@ export class InteractionRouter {
         return;
       }
 
+      if (this.isAnySelectMenuInteraction(interaction)) {
+        await this.handleSelectMenu(interaction);
+        return;
+      }
+
       if (interaction.isModalSubmit()) {
         await this.handleModal(interaction);
       }
@@ -106,8 +119,7 @@ export class InteractionRouter {
       this.options.logger.error("Interaction handler failed.", {
         error,
         commandName: interaction.isChatInputCommand() ? interaction.commandName : undefined,
-        customId:
-          interaction.isButton() || interaction.isModalSubmit() ? interaction.customId : undefined,
+        customId: this.getCustomId(interaction),
         userId: interaction.user.id,
         guildId: interaction.guildId,
         channelId: interaction.channelId,
@@ -121,8 +133,7 @@ export class InteractionRouter {
         this.options.logger.warn("Failed to send generic interaction error response.", {
           error: replyError,
           commandName: interaction.isChatInputCommand() ? interaction.commandName : undefined,
-          customId:
-            interaction.isButton() || interaction.isModalSubmit() ? interaction.customId : undefined,
+          customId: this.getCustomId(interaction),
           userId: interaction.user.id,
           guildId: interaction.guildId,
           channelId: interaction.channelId,
@@ -157,6 +168,20 @@ export class InteractionRouter {
     await route.handler(interaction);
   }
 
+  private async handleSelectMenu(interaction: AnySelectMenuInteraction): Promise<void> {
+    const route = this.selectMenuHandlers.find((candidate) =>
+      matchesCustomId(candidate.matcher, interaction.customId),
+    );
+    if (!route) {
+      this.options.logger.warn("No select menu handler registered.", {
+        customId: interaction.customId,
+      });
+      return;
+    }
+
+    await route.handler(interaction);
+  }
+
   private async handleModal(interaction: ModalSubmitInteraction): Promise<void> {
     const route = this.modalHandlers.find((candidate) =>
       matchesCustomId(candidate.matcher, interaction.customId),
@@ -169,5 +194,25 @@ export class InteractionRouter {
     }
 
     await route.handler(interaction);
+  }
+
+  private isAnySelectMenuInteraction(interaction: BaseInteraction): interaction is AnySelectMenuInteraction {
+    return (
+      "isAnySelectMenu" in interaction &&
+      typeof interaction.isAnySelectMenu === "function" &&
+      interaction.isAnySelectMenu()
+    );
+  }
+
+  private getCustomId(interaction: BaseInteraction): string | undefined {
+    if (
+      interaction.isButton() ||
+      interaction.isModalSubmit() ||
+      this.isAnySelectMenuInteraction(interaction)
+    ) {
+      return interaction.customId;
+    }
+
+    return undefined;
   }
 }

@@ -54,6 +54,7 @@ interface UndoBlockCheckParams {
   attackEntries: readonly AttackEntry[];
   resourceAdjustments: readonly ResourceAdjustment[];
   operationLogs: readonly OperationLog[];
+  battleAttackLimit?: number;
 }
 
 interface RestoreExpiredAttackEntriesAfterDefeatUndoInMemoryParams {
@@ -165,6 +166,7 @@ export function isUndoBlockedByLaterOperations(params: UndoBlockCheckParams): bo
   return !validateAttackEntryResourceProgression(
     simulatedAttackEntries,
     params.resourceAdjustments,
+    () => params.battleAttackLimit ?? 3,
   );
 }
 

@@ -24,6 +24,10 @@ interface LatestResourceAdjustments {
   carryover: ResourceAdjustment | null;
 }
 
+export type BattleAttackLimitResolver = (categoryId: string, userId: string) => number;
+
+const DEFAULT_BATTLE_ATTACK_LIMIT_RESOLVER: BattleAttackLimitResolver = () => 3;
+
 function buildProjectionKey(categoryId: string, userId: string, dayKey: string): string {
   return `${categoryId}\u0000${userId}\u0000${dayKey}`;
 }
@@ -100,17 +104,20 @@ function resolveCarryAvailableCount(counters: ProjectedResourceCounters): number
   return counters.carryProducedCount - counters.carryReservedCount - counters.carryConsumedCount;
 }
 
-function areProjectedResourceCountersValid(counters: ProjectedResourceCounters): boolean {
+function areProjectedResourceCountersValid(
+  counters: ProjectedResourceCounters,
+  battleAttackLimit: number,
+): boolean {
   const carryAvailableCount = resolveCarryAvailableCount(counters);
 
   return (
     0 <= counters.battleReservedCount &&
     0 <= counters.battleConsumedCount &&
-    counters.battleReservedCount + counters.battleConsumedCount <= 3 &&
+    counters.battleReservedCount + counters.battleConsumedCount <= battleAttackLimit &&
     0 <= counters.carryReservedCount &&
     0 <= counters.carryConsumedCount &&
     0 <= carryAvailableCount &&
-    carryAvailableCount + counters.carryReservedCount <= 3
+    carryAvailableCount + counters.carryReservedCount <= battleAttackLimit
   );
 }
 
@@ -165,6 +172,7 @@ function collectLatestResourceAdjustmentsByProjectionKey(
 function applyResourceAdjustmentsToPlayerState(
   playerResourceState: PlayerResourceState,
   latestAdjustments: LatestResourceAdjustments | undefined,
+  battleAttackLimit: number,
 ): boolean {
   if (!latestAdjustments) {
     return true;
@@ -172,8 +180,10 @@ function applyResourceAdjustmentsToPlayerState(
 
   if (latestAdjustments.battle) {
     const nextBattleConsumedCount =
-      3 - playerResourceState.battleReservedCount - latestAdjustments.battle.remaining;
-    if (nextBattleConsumedCount < 0 || 3 < nextBattleConsumedCount) {
+      battleAttackLimit -
+      playerResourceState.battleReservedCount -
+      latestAdjustments.battle.remaining;
+    if (nextBattleConsumedCount < 0 || battleAttackLimit < nextBattleConsumedCount) {
       return false;
     }
 
@@ -182,11 +192,11 @@ function applyResourceAdjustmentsToPlayerState(
 
   if (latestAdjustments.carryover) {
     const nextCarryAvailableCount = latestAdjustments.carryover.remaining;
-    if (nextCarryAvailableCount < 0 || 3 < nextCarryAvailableCount) {
+    if (nextCarryAvailableCount < 0 || battleAttackLimit < nextCarryAvailableCount) {
       return false;
     }
 
-    if (nextCarryAvailableCount + playerResourceState.carryReservedCount > 3) {
+    if (nextCarryAvailableCount + playerResourceState.carryReservedCount > battleAttackLimit) {
       return false;
     }
 
@@ -199,6 +209,7 @@ function applyResourceAdjustmentsToPlayerState(
 function buildPlayerResourceStates(
   attackEntries: readonly AttackEntry[],
   resourceAdjustments: readonly ResourceAdjustment[] = [],
+  resolveBattleAttackLimit: BattleAttackLimitResolver = DEFAULT_BATTLE_ATTACK_LIMIT_RESOLVER,
 ): RebuildPlayerResourceStatesResult {
   const states = new Map<string, PlayerResourceState>();
   const countersByProjectionKey = new Map<string, ProjectedResourceCounters>();
@@ -235,7 +246,11 @@ function buildPlayerResourceStates(
 
   for (const [projectionKey, playerResourceState] of states.entries()) {
     const counters = countersByProjectionKey.get(projectionKey) ?? createProjectedResourceCounters();
-    if (!areProjectedResourceCountersValid(counters)) {
+    const battleAttackLimit = resolveBattleAttackLimit(
+      playerResourceState.categoryId,
+      playerResourceState.userId,
+    );
+    if (!areProjectedResourceCountersValid(counters, battleAttackLimit)) {
       return {
         playerResourceStates: [],
         isValid: false,
@@ -251,6 +266,7 @@ function buildPlayerResourceStates(
       !applyResourceAdjustmentsToPlayerState(
         playerResourceState,
         latestAdjustmentsByProjectionKey.get(projectionKey),
+        battleAttackLimit,
       )
     ) {
       return {
@@ -279,13 +295,23 @@ function buildPlayerResourceStates(
 export function validateAttackEntryResourceProgression(
   attackEntries: readonly AttackEntry[],
   resourceAdjustments: readonly ResourceAdjustment[] = [],
+  resolveBattleAttackLimit: BattleAttackLimitResolver = DEFAULT_BATTLE_ATTACK_LIMIT_RESOLVER,
 ): boolean {
-  return buildPlayerResourceStates(attackEntries, resourceAdjustments).isValid;
+  return buildPlayerResourceStates(
+    attackEntries,
+    resourceAdjustments,
+    resolveBattleAttackLimit,
+  ).isValid;
 }
 
 export function rebuildPlayerResourceStates(
   attackEntries: readonly AttackEntry[],
   resourceAdjustments: readonly ResourceAdjustment[] = [],
+  resolveBattleAttackLimit: BattleAttackLimitResolver = DEFAULT_BATTLE_ATTACK_LIMIT_RESOLVER,
 ): PlayerResourceState[] {
-  return buildPlayerResourceStates(attackEntries, resourceAdjustments).playerResourceStates;
+  return buildPlayerResourceStates(
+    attackEntries,
+    resourceAdjustments,
+    resolveBattleAttackLimit,
+  ).playerResourceStates;
 }

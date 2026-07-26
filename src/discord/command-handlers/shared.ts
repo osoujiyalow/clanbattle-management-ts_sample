@@ -170,14 +170,8 @@ export async function resolveRoleMembers(
   guild: Guild,
   role: Role | APIRole,
 ): Promise<readonly DiscordMemberIdentity[]> {
-  if ("members" in role) {
-    return Array.from(role.members.values()).map((member) => ({
-      id: member.id,
-      displayName: resolvePreferredGuildMemberDisplayName(member),
-    }));
-  }
-
-  return guild.members.cache
+  const guildMembers = await guild.members.fetch();
+  return guildMembers
     .filter((member) => member.roles.cache.has(role.id))
     .map((member) => ({
       id: member.id,

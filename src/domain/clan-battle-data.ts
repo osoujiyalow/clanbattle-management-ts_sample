@@ -11,6 +11,11 @@ export interface GuildBossInfoConfigRecord {
   hp: number[][];
 }
 
+export interface ClanBattlePhaseProgress {
+  phaseNumber: number;
+  lapsUntilNextPhase: number | null;
+}
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -96,15 +101,36 @@ export class ClanBattleData {
 
   static getHp(lap: number, bossIndex: number, guildId?: string | null): number {
     const config = this.getGuildConfig(guildId);
+    const phaseIndex = this.resolvePhaseIndex(lap, config);
 
+    return config.hp[phaseIndex]![bossIndex]!;
+  }
+
+  static getPhaseNumber(lap: number, guildId?: string | null): number {
+    return this.getPhaseProgress(lap, guildId).phaseNumber;
+  }
+
+  static getPhaseProgress(lap: number, guildId?: string | null): ClanBattlePhaseProgress {
+    const config = this.getGuildConfig(guildId);
+    const phaseIndex = this.resolvePhaseIndex(lap, config);
+    const [, lapTo] = config.boundaries[phaseIndex]!;
+    const isFinalPhase = phaseIndex >= config.boundaries.length - 1 || lapTo === -1;
+
+    return {
+      phaseNumber: phaseIndex + 1,
+      lapsUntilNextPhase: isFinalPhase ? null : lapTo - lap + 1,
+    };
+  }
+
+  private static resolvePhaseIndex(lap: number, config: GuildBossInfoConfig): number {
     for (let phaseIndex = 0; phaseIndex < config.boundaries.length; phaseIndex += 1) {
       const [lapFrom, lapTo] = config.boundaries[phaseIndex]!;
       if ((lapFrom <= lap && lap <= lapTo) || (lapFrom <= lap && lapTo === -1)) {
-        return config.hp[phaseIndex]![bossIndex]!;
+        return phaseIndex;
       }
     }
 
-    return config.hp[config.hp.length - 1]![bossIndex]!;
+    return config.boundaries.length - 1;
   }
 
   static validateConfig(

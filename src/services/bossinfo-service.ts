@@ -29,8 +29,16 @@ const HP_ERROR_PREFIX = "HP入力エラー: ";
 const FINAL_VALIDATION_ERROR_PREFIX = "最終バリデーションでエラーになりました: ";
 const SAVE_VALIDATION_ERROR_PREFIX = "保存前バリデーションエラー: ";
 const SESSION_TIMEOUT_MS = 600_000;
+const PHASE_ROW_HP_BOSS_INDEX = -1;
 
-type BossInfoViewAction = "start" | "cancel" | "open-boundary" | "open-hp" | "save";
+type BossInfoViewAction =
+  | "start"
+  | "open-phase-count"
+  | "cancel"
+  | "open-boundary"
+  | "open-hp"
+  | "preview-save"
+  | "save";
 type BossInfoViewStyle = "primary" | "secondary" | "success";
 
 export interface BossInfoButtonSpec {
@@ -40,7 +48,7 @@ export interface BossInfoButtonSpec {
 }
 
 export interface BossInfoViewSpec {
-  kind: "start" | "boundary" | "hp" | "confirm";
+  kind: "menu" | "start" | "boundary" | "hp" | "confirm";
   timeoutSeconds: number;
   buttons: readonly BossInfoButtonSpec[];
   bossNumber?: number;
@@ -145,12 +153,15 @@ function createMessageResult(
   };
 }
 
-function createStartView(): BossInfoViewSpec {
+function createEditorMenuView(): BossInfoViewSpec {
   return {
-    kind: "start",
+    kind: "menu",
     timeoutSeconds: 600,
     buttons: [
-      { label: "編集開始", style: "primary", action: "start" },
+      { label: "段階数", style: "primary", action: "open-phase-count" },
+      { label: "境界", style: "primary", action: "open-boundary" },
+      { label: "HP", style: "primary", action: "open-hp" },
+      { label: "保存確認", style: "success", action: "preview-save" },
       { label: "キャンセル", style: "secondary", action: "cancel" },
     ],
   };
@@ -260,7 +271,7 @@ export class BossInfoService {
       updatedAt: timestamp,
     });
 
-    return createMessageResult(renderBossInfoIntroText(current), createStartView());
+    return createMessageResult(renderBossInfoIntroText(current), createEditorMenuView());
   }
 
   ensureWizardOwner(
@@ -309,14 +320,20 @@ export class BossInfoService {
       const phaseCount = this.parsePhaseCount(request.rawValue, session.config.boundaries.length);
       this.resizeConfig(session, phaseCount);
     } catch (error) {
-      return createMessageResult(`${PHASE_COUNT_ERROR_PREFIX}${this.getErrorMessage(error)}`);
+      return createMessageResult(
+        `${PHASE_COUNT_ERROR_PREFIX}${this.getErrorMessage(error)}`,
+        createEditorMenuView(),
+      );
     }
 
     session.boundaryChunkIndex = 0;
     session.hpBossIndex = 0;
     session.hpChunkIndex = 0;
 
-    return this.buildBoundaryPrompt(session);
+    return this.buildEditorMenuPrompt(
+      session,
+      "段階数を下書きに反映しました。必要に応じて境界とHPを確認してください。",
+    );
   }
 
   openBoundaryModal(request: BossInfoSessionRequest): BossInfoUiResult {
@@ -355,6 +372,10 @@ export class BossInfoService {
       return session;
     }
 
+    if (session.boundaryChunkIndex >= this.totalPhaseChunks(session.config)) {
+      session.boundaryChunkIndex = 0;
+    }
+
     return this.getBoundaryChunkRange(session);
   }
 
@@ -365,6 +386,7 @@ export class BossInfoService {
     }
 
     try {
+      const updates: { phaseIndex: number; boundary: [number, number] }[] = [];
       for (
         let phaseIndex = request.startIndex, offset = 0;
         phaseIndex <= request.endIndex;
@@ -378,10 +400,17 @@ export class BossInfoService {
           continue;
         }
 
-        session.config.boundaries[phaseIndex] = this.parseBoundary(raw);
+        updates.push({ phaseIndex, boundary: this.parseBoundary(raw) });
+      }
+
+      for (const update of updates) {
+        session.config.boundaries[update.phaseIndex] = update.boundary;
       }
     } catch (error) {
-      return createMessageResult(`${BOUNDARY_ERROR_PREFIX}${this.getErrorMessage(error)}`);
+      return createMessageResult(
+        `${BOUNDARY_ERROR_PREFIX}${this.getErrorMessage(error)}`,
+        createBoundaryView(session.boundaryChunkIndex, this.totalPhaseChunks(session.config)),
+      );
     }
 
     session.boundaryChunkIndex += 1;
@@ -391,7 +420,8 @@ export class BossInfoService {
 
     session.hpBossIndex = 0;
     session.hpChunkIndex = 0;
-    return this.buildHpPrompt(session);
+    session.boundaryChunkIndex = 0;
+    return this.buildEditorMenuPrompt(session, "境界を下書きに反映しました。");
   }
 
   openHpModal(request: BossInfoSessionRequest): BossInfoUiResult {
@@ -405,11 +435,11 @@ export class BossInfoService {
 
     for (let phaseIndex = startIndex; phaseIndex <= endIndex; phaseIndex += 1) {
       fields.push({
-        label: `${phaseIndex + 1}段階 HP`,
+        label: `${phaseIndex + 1}段階 HP (1〜5ボス順)`,
         required: false,
-        defaultValue: this.getHpDefaultText(session, session.hpBossIndex, phaseIndex),
-        placeholder: "例: 5600",
-        maxLength: 16,
+        defaultValue: this.getHpRowDefaultText(session, phaseIndex),
+        placeholder: "例: 1200 1500 2000 2300 3000",
+        maxLength: 80,
       });
     }
 
@@ -417,8 +447,14 @@ export class BossInfoService {
       kind: "modal",
       visibility: "ephemeral",
       timeoutSeconds: 600,
-      title: `ボス情報書き換え: ${session.hpBossIndex + 1}ボスHP (${startIndex + 1}-${endIndex + 1}段階)`,
+      title: `ボス情報書き換え: HP (${startIndex + 1}-${endIndex + 1}段階)`,
       fields,
+      context: {
+        kind: "hp",
+        bossIndex: PHASE_ROW_HP_BOSS_INDEX,
+        startIndex,
+        endIndex,
+      },
     };
   }
 
@@ -430,9 +466,13 @@ export class BossInfoService {
       return session;
     }
 
+    if (session.hpChunkIndex >= this.totalPhaseChunks(session.config)) {
+      session.hpChunkIndex = 0;
+    }
+
     const { startIndex, endIndex } = this.getHpChunkRange(session);
     return {
-      bossIndex: session.hpBossIndex,
+      bossIndex: PHASE_ROW_HP_BOSS_INDEX,
       startIndex,
       endIndex,
     };
@@ -444,7 +484,12 @@ export class BossInfoService {
       return session;
     }
 
+    if (request.bossIndex >= 0) {
+      return this.submitLegacyBossHp(request, session);
+    }
+
     try {
+      const updates: { phaseIndex: number; hp: number[] }[] = [];
       for (
         let phaseIndex = request.startIndex, offset = 0;
         phaseIndex <= request.endIndex;
@@ -458,10 +503,17 @@ export class BossInfoService {
           continue;
         }
 
-        session.config.hp[phaseIndex]![request.bossIndex] = this.parseHpValue(raw, phaseIndex);
+        updates.push({ phaseIndex, hp: this.parseHpRow(raw, phaseIndex) });
+      }
+
+      for (const update of updates) {
+        session.config.hp[update.phaseIndex] = update.hp;
       }
     } catch (error) {
-      return createMessageResult(`${HP_ERROR_PREFIX}${this.getErrorMessage(error)}`);
+      return createMessageResult(
+        `${HP_ERROR_PREFIX}${this.getErrorMessage(error)}`,
+        createHpView(PHASE_ROW_HP_BOSS_INDEX, session.hpChunkIndex, this.totalPhaseChunks(session.config)),
+      );
     }
 
     const nextChunkIndex = session.hpChunkIndex + 1;
@@ -471,11 +523,14 @@ export class BossInfoService {
       return this.buildHpPrompt(session);
     }
 
-    const nextBossIndex = session.hpBossIndex + 1;
-    if (nextBossIndex < 5) {
-      session.hpBossIndex = nextBossIndex;
-      session.hpChunkIndex = 0;
-      return this.buildHpPrompt(session);
+    session.hpChunkIndex = 0;
+    return this.buildEditorMenuPrompt(session, "HPを下書きに反映しました。");
+  }
+
+  previewSave(request: BossInfoSessionRequest): BossInfoMessageResult {
+    const session = this.getSessionOrError(request);
+    if ("kind" in session) {
+      return session;
     }
 
     return this.buildConfirmPrompt(session);
@@ -491,7 +546,10 @@ export class BossInfoService {
     try {
       validated = ClanBattleData.validateConfig(session.config.hp, session.config.boundaries);
     } catch (error) {
-      return createMessageResult(`${SAVE_VALIDATION_ERROR_PREFIX}${this.getErrorMessage(error)}`);
+      return createMessageResult(
+        `${SAVE_VALIDATION_ERROR_PREFIX}${this.getErrorMessage(error)}`,
+        createEditorMenuView(),
+      );
     }
 
     this.options.guildBossInfoRepository.upsert(session.guildId, validated, session.userId);
@@ -531,6 +589,13 @@ export class BossInfoService {
     );
   }
 
+  private buildEditorMenuPrompt(session: BossInfoSession, notice?: string): BossInfoMessageResult {
+    return createMessageResult(
+      renderBossInfoIntroText(session.config, notice),
+      createEditorMenuView(),
+    );
+  }
+
   private buildConfirmPrompt(session: BossInfoSession): BossInfoMessageResult {
     try {
       const validated = ClanBattleData.validateConfig(session.config.hp, session.config.boundaries);
@@ -541,7 +606,8 @@ export class BossInfoService {
       return createMessageResult(renderBossInfoConfirmText(validated, source), createConfirmView());
     } catch (error) {
       return createMessageResult(
-        `${FINAL_VALIDATION_ERROR_PREFIX}${this.getErrorMessage(error)}\n再度 \`/bossinfo_edit\` でやり直してください。`,
+        `${FINAL_VALIDATION_ERROR_PREFIX}${this.getErrorMessage(error)}\n内容を修正してから、もう一度保存確認してください。`,
+        createEditorMenuView(),
       );
     }
   }
@@ -570,6 +636,19 @@ export class BossInfoService {
 
     const value = session.config.hp[phaseIndex]?.[bossIndex] ?? 0;
     return value > 0 ? String(value) : "";
+  }
+
+  private getHpRowDefaultText(session: BossInfoSession, phaseIndex: number): string {
+    if (phaseIndex >= session.config.hp.length) {
+      return "";
+    }
+
+    const values = session.config.hp[phaseIndex] ?? [];
+    if (values.some((value) => value <= 0)) {
+      return "";
+    }
+
+    return values.join(" ");
   }
 
   private totalPhaseChunks(config: GuildBossInfoConfig): number {
@@ -662,6 +741,76 @@ export class BossInfoService {
       rawValue,
       `${phaseIndex + 1}段階HPは正の整数で入力してください。`,
     );
+  }
+
+  private parseHpRow(rawValue: string, phaseIndex: number): number[] {
+    const errorMessage =
+      `${phaseIndex + 1}段階HPは1〜5ボス分の正の整数で入力してください。` +
+      " 例: `1200 1500 2000 2300 3000`";
+    const tokens = this.tokenizeNumericTokens(rawValue, errorMessage);
+    if (tokens.length !== 5) {
+      throw new Error(errorMessage);
+    }
+
+    return tokens.map((token) => {
+      const value = parseNormalizedIntegerToken(token);
+      if (value === null || value <= 0) {
+        throw new Error(errorMessage);
+      }
+
+      return value;
+    });
+  }
+
+  private submitLegacyBossHp(
+    request: BossInfoHpSubmitRequest,
+    session: BossInfoSession,
+  ): BossInfoMessageResult {
+    try {
+      const updates: { phaseIndex: number; hp: number }[] = [];
+      for (
+        let phaseIndex = request.startIndex, offset = 0;
+        phaseIndex <= request.endIndex;
+        phaseIndex += 1, offset += 1
+      ) {
+        const raw = request.values[offset]?.trim() ?? "";
+        if (!raw) {
+          if (phaseIndex >= session.originalPhaseCount) {
+            throw new Error(`${phaseIndex + 1}段階HPは新規フェーズなので入力必須です。`);
+          }
+          continue;
+        }
+
+        updates.push({ phaseIndex, hp: this.parseHpValue(raw, phaseIndex) });
+      }
+
+      for (const update of updates) {
+        session.config.hp[update.phaseIndex]![request.bossIndex] = update.hp;
+      }
+    } catch (error) {
+      return createMessageResult(
+        `${HP_ERROR_PREFIX}${this.getErrorMessage(error)}`,
+        createHpView(request.bossIndex + 1, session.hpChunkIndex, this.totalPhaseChunks(session.config)),
+      );
+    }
+
+    const nextChunkIndex = session.hpChunkIndex + 1;
+    const totalChunks = this.totalPhaseChunks(session.config);
+    if (nextChunkIndex < totalChunks) {
+      session.hpChunkIndex = nextChunkIndex;
+      return this.buildHpPrompt(session);
+    }
+
+    const nextBossIndex = session.hpBossIndex + 1;
+    if (nextBossIndex < 5) {
+      session.hpBossIndex = nextBossIndex;
+      session.hpChunkIndex = 0;
+      return this.buildHpPrompt(session);
+    }
+
+    session.hpBossIndex = 0;
+    session.hpChunkIndex = 0;
+    return this.buildEditorMenuPrompt(session, "HPを下書きに反映しました。");
   }
 
   private parsePositiveInteger(rawValue: string, errorMessage: string): number {

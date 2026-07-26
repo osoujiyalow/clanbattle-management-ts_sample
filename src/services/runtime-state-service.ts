@@ -105,6 +105,8 @@ interface PendingAttackStatusDeletion {
   attackStatus: AttackStatus;
 }
 
+export type CategoryStateChangeListener = (categoryId: string) => void;
+
 export class RuntimeStateService {
   private readonly clanRepository: ClanRepository;
   private readonly playerRepository: PlayerRepository;
@@ -131,6 +133,7 @@ export class RuntimeStateService {
   >();
   private operationLogsByCategory = new Map<string, OperationLog[]>();
   private lastOrphanedCategoryScanReport: OrphanedCategoryScanReport | null = null;
+  private readonly categoryStateChangeListeners = new Set<CategoryStateChangeListener>();
 
   constructor(options: RuntimeStateServiceOptions) {
     this.database = options.database;
@@ -162,6 +165,7 @@ export class RuntimeStateService {
       playerResourceStateRepository: this.playerResourceStateRepository,
       operationLogRepository: this.operationLogRepository,
       resourceAdjustmentRepository: this.resourceAdjustmentRepository,
+      playerRepository: this.playerRepository,
     });
   }
 
@@ -438,11 +442,13 @@ export class RuntimeStateService {
       this.projectionCoordinator.groupPlayerResourceStates(result.playerResourceStates),
     );
     this.operationLogsByCategory.set(categoryId, result.operationLogs);
+    this.notifyCategoryStateChanged(categoryId);
     return result;
   }
 
   set(clanData: ClanData): void {
     this.clanDataByCategory.set(clanData.categoryId, clanData);
+    this.notifyCategoryStateChanged(clanData.categoryId);
   }
 
   delete(categoryId: string): void {
@@ -457,6 +463,26 @@ export class RuntimeStateService {
     operation: () => TResult | Promise<TResult>,
   ): Promise<TResult> {
     return this.categoryLock.run(categoryId, operation);
+  }
+
+  subscribeCategoryStateChanges(listener: CategoryStateChangeListener): () => void {
+    this.categoryStateChangeListeners.add(listener);
+    return () => {
+      this.categoryStateChangeListeners.delete(listener);
+    };
+  }
+
+  notifyCategoryStateChanged(categoryId: string): void {
+    for (const listener of this.categoryStateChangeListeners) {
+      try {
+        listener(categoryId);
+      } catch (error) {
+        this.logger.warn("Category state change listener failed", {
+          categoryId,
+          error,
+        });
+      }
+    }
   }
 
   async ensureDateUpToDate(
@@ -474,6 +500,7 @@ export class RuntimeStateService {
     const result = ensureClanBattleDay(clanData, clock);
 
     if (!result.changed) {
+      this.notifyCategoryStateChanged(categoryId);
       return result;
     }
 
@@ -525,6 +552,7 @@ export class RuntimeStateService {
       expiredAttackEntryCount: projectedStateRefreshResult.expiredAttackEntryCount,
     });
 
+    this.notifyCategoryStateChanged(categoryId);
     return result;
   }
 

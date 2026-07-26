@@ -30,6 +30,7 @@ export interface LogData {
 
 export interface PlayerDataRecord {
   userId: string;
+  battleAttackLimit?: number;
   battleAttackCount?: number;
   physicsAttack?: number;
   magicAttack?: number;
@@ -47,6 +48,7 @@ export interface CarryOverParams {
 
 export interface PlayerDataParams {
   userId: string;
+  battleAttackLimit?: number;
   battleAttackCount?: number;
   physicsAttack?: number;
   magicAttack?: number;
@@ -236,6 +238,7 @@ function resolveBattleAttackCounters(params: PlayerDataParams | PlayerDataRecord
 
 export class PlayerData {
   readonly userId: string;
+  battleAttackLimit: number;
   private _battleAttackCount: number;
   private _physicsAttack: number;
   private _magicAttack: number;
@@ -248,6 +251,7 @@ export class PlayerData {
     const resolvedCounters = resolveBattleAttackCounters(params);
 
     this.userId = params.userId;
+    this.battleAttackLimit = params.battleAttackLimit ?? 3;
     this._battleAttackCount = resolvedCounters.battleAttackCount;
     this._physicsAttack = resolvedCounters.physicsAttack;
     this._magicAttack = resolvedCounters.magicAttack;
@@ -261,6 +265,9 @@ export class PlayerData {
   static fromRecord(record: PlayerDataRecord): PlayerData {
     return new PlayerData({
       userId: record.userId,
+      ...(record.battleAttackLimit !== undefined
+        ? { battleAttackLimit: record.battleAttackLimit }
+        : {}),
       ...(record.battleAttackCount !== undefined
         ? { battleAttackCount: record.battleAttackCount }
         : {}),
@@ -302,7 +309,7 @@ export class PlayerData {
   }
 
   incrementBattleAttackCount(): void {
-    if (this._battleAttackCount >= 3) {
+    if (this._battleAttackCount >= this.battleAttackLimit) {
       return;
     }
 
@@ -339,7 +346,7 @@ export class PlayerData {
   }
 
   createSimpleTxt(displayName: string, clock: Clock = systemClock): string {
-    let text = `\n　　- ${displayName} (本戦凸 ${this.battleAttackCount}/3)`;
+    let text = `\n　　- ${displayName} (本戦凸 ${this.battleAttackCount}/${this.battleAttackLimit})`;
 
     if (this.taskKill) {
       text += ` ${EMOJIS.taskKill}`;
@@ -353,7 +360,7 @@ export class PlayerData {
   }
 
   createCompactProgressTxt(displayName: string, clock: Clock = systemClock): string {
-    let text = `\n　　- ${displayName} (${this.battleAttackCount}/3)`;
+    let text = `\n　　- ${displayName} (${this.battleAttackCount}/${this.battleAttackLimit})`;
 
     if (this.taskKill) {
       text += ` ${EMOJIS.taskKill}`;
@@ -386,6 +393,7 @@ export class PlayerData {
   toRecord(): PlayerDataRecord {
     return {
       userId: this.userId,
+      battleAttackLimit: this.battleAttackLimit,
       battleAttackCount: this.battleAttackCount,
       physicsAttack: this.physicsAttack,
       magicAttack: this.magicAttack,

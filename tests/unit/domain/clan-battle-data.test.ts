@@ -32,6 +32,16 @@ describe("ClanBattleData", () => {
 
     expect(ClanBattleData.getHp(2, 3, "guild-1")).toBe(4);
     expect(ClanBattleData.getHp(9, 1, "guild-1")).toBe(7);
+    expect(ClanBattleData.getPhaseNumber(2, "guild-1")).toBe(1);
+    expect(ClanBattleData.getPhaseNumber(9, "guild-1")).toBe(2);
+    expect(ClanBattleData.getPhaseProgress(2, "guild-1")).toEqual({
+      phaseNumber: 1,
+      lapsUntilNextPhase: 2,
+    });
+    expect(ClanBattleData.getPhaseProgress(9, "guild-1")).toEqual({
+      phaseNumber: 2,
+      lapsUntilNextPhase: null,
+    });
   });
 
   it("validates and round-trips json config", () => {

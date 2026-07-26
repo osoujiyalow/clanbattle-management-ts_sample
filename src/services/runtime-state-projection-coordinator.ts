@@ -6,6 +6,7 @@ import type { PlayerResourceState } from "../domain/player-resource-state.js";
 import type { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import type { OperationLogRepository } from "../repositories/sqlite/operation-log-repository.js";
 import type { PlayerResourceStateRepository } from "../repositories/sqlite/player-resource-state-repository.js";
+import type { PlayerRepository } from "../repositories/sqlite/player-repository.js";
 import type { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
 import { rebuildPlayerResourceStates } from "./player-resource-state-projection.js";
 
@@ -28,6 +29,7 @@ export interface RuntimeStateProjectionCoordinatorOptions {
   playerResourceStateRepository: PlayerResourceStateRepository;
   operationLogRepository: OperationLogRepository;
   resourceAdjustmentRepository: ResourceAdjustmentRepository;
+  playerRepository: PlayerRepository;
 }
 
 export class RuntimeStateProjectionCoordinator {
@@ -95,7 +97,12 @@ export class RuntimeStateProjectionCoordinator {
     }
 
     const resourceAdjustments = this.options.resourceAdjustmentRepository.findAllByCategory(categoryId);
-    const playerResourceStates = rebuildPlayerResourceStates(attackEntries, resourceAdjustments);
+    const playerDataByUserId = this.options.playerRepository.findByCategoryId(categoryId);
+    const playerResourceStates = rebuildPlayerResourceStates(
+      attackEntries,
+      resourceAdjustments,
+      (_categoryId, userId) => playerDataByUserId.get(userId)?.battleAttackLimit ?? 3,
+    );
     this.options.playerResourceStateRepository.deleteAllByCategory(categoryId);
     for (const playerResourceState of playerResourceStates) {
       this.options.playerResourceStateRepository.insert(playerResourceState);

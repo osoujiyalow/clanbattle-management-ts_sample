@@ -29,6 +29,7 @@ import type { MemberService } from "../../services/member-service.js";
 import type { ProgressMessageService } from "../../services/progress-message-service.js";
 import type { RuntimeStateService } from "../../services/runtime-state-service.js";
 import { createChannelCarryOverSelector } from "../carryover-selector.js";
+import { cleanupDepartedMembersOnDateRollover } from "../day-rollover-departed-member-cleanup.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import {
   DiscordGuildTextGateway,
@@ -54,7 +55,8 @@ export interface AttackCommandHandlersOptions {
   progressMessageService: Pick<ProgressMessageService, "resend">;
   runtimeStateService: Pick<RuntimeStateService, "get" | "ensureDateUpToDate"> &
     Partial<Pick<RuntimeStateService, "getOperationLogs" | "getPlayerResourceState">>;
-  memberService: Pick<MemberService, "ensureCurrentRemainAttackMessage">;
+  memberService: Pick<MemberService, "ensureCurrentRemainAttackMessage"> &
+    Partial<Pick<MemberService, "remove">>;
 }
 
 interface AttackCommandContext {
@@ -267,7 +269,10 @@ function formatNoPendingAttackButtonMessage(
   const occupiedBattleCount =
     (playerResourceState?.battleReservedCount ?? 0) +
     (playerResourceState?.battleConsumedCount ?? playerData.battleAttackCount);
-  const remainingBattleCount = Math.max(0, 3 - occupiedBattleCount);
+  const remainingBattleCount = Math.max(
+    0,
+    playerData.battleAttackLimit - occupiedBattleCount,
+  );
   const carryAvailableCount =
     playerResourceState?.carryAvailableCount ?? playerData.carryOverList.length;
 
@@ -536,7 +541,18 @@ async function createAttackButtonContext(
     return null;
   }
 
-  await options.runtimeStateService.ensureDateUpToDate(categoryId);
+  if (options.memberService.remove) {
+    await cleanupDepartedMembersOnDateRollover({
+      runtimeStateService: options.runtimeStateService,
+      memberService: {
+        remove: (request) => options.memberService.remove!(request),
+      },
+      guild: interaction.guild,
+      categoryId,
+    });
+  } else {
+    await options.runtimeStateService.ensureDateUpToDate(categoryId);
+  }
 
   const clanData = options.runtimeStateService.get(categoryId);
   if (!clanData) {
@@ -585,12 +601,24 @@ async function createAttackCommandContext(
 
   const managedContext = await resolveManagedInteractionContext(interaction);
   const categoryId = managedContext.categoryId ?? interaction.channelId;
+  const discordGateway = new DiscordGuildTextGateway(interaction.guild);
+  if (options.memberService.remove) {
+    await cleanupDepartedMembersOnDateRollover({
+      runtimeStateService: options.runtimeStateService,
+      memberService: {
+        remove: (request) => options.memberService.remove!(request),
+      },
+      guild: interaction.guild,
+      categoryId,
+      discordGateway,
+    });
+  }
   const clanData = options.runtimeStateService.get(categoryId);
   return {
     categoryId,
     commandChannelId: managedContext.commandChannelId,
     responseChannel: new SlashResponseChannelAdapter(interaction, false),
-    discordGateway: new DiscordGuildTextGateway(interaction.guild),
+    discordGateway,
     displayNamesByUserId: clanData
       ? await resolveGuildDisplayNamesForUserIds(interaction.guild, clanData.playerDataMap.keys())
       : resolveCachedGuildDisplayNames(interaction.guild),

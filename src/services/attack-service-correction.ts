@@ -63,6 +63,7 @@ export function prepareAttackKindCorrection(params: {
   sameDayAttackEntries: readonly AttackEntry[];
   sameDayResourceAdjustments: readonly ResourceAdjustment[];
   targetAttackEntryId: string;
+  battleAttackLimit?: number;
 }): AttackKindCorrectionPreparation {
   const simulatedAttackEntries = params.sameDayAttackEntries.map((attackEntry) =>
     AttackEntry.fromRecord(attackEntry.toRecord()),
@@ -89,6 +90,7 @@ export function prepareAttackKindCorrection(params: {
     !validateAttackEntryResourceProgression(
       simulatedAttackEntries,
       params.sameDayResourceAdjustments,
+      () => params.battleAttackLimit ?? 3,
     )
   ) {
     return {

@@ -22,6 +22,7 @@ create table if not exists PlayerData (
   physics_attack int default 0,
   magic_attack int default 0,
   battle_attack_count int default 0,
+  battle_attack_limit int default 3,
   task_kill boolean
 );
 
@@ -132,6 +133,11 @@ create table if not exists GuildBossInfoConfig (
   boundaries_json text not null,
   updated_by int,
   updated_at datetime default current_timestamp
+);
+
+create table if not exists ActiveAttackerRoleConfig (
+  category_id int primary key,
+  role_id int not null
 );
 `;
 
@@ -534,6 +540,22 @@ function ensureBattleAttackCountColumn(database: SqliteDatabase): void {
   database.exec("alter table PlayerData add column battle_attack_count int default 0");
 }
 
+function ensureBattleAttackLimitColumn(database: SqliteDatabase): void {
+  if (!tableExists(database, "PlayerData")) {
+    return;
+  }
+
+  if (!columnExists(database, "PlayerData", "battle_attack_limit")) {
+    database.exec("alter table PlayerData add column battle_attack_limit int default 3");
+  }
+
+  database.exec(`
+    update PlayerData
+    set battle_attack_limit=3
+    where battle_attack_limit is null or battle_attack_limit < 3
+  `);
+}
+
 function backfillBattleAttackCount(database: SqliteDatabase): void {
   if (!tableExists(database, "PlayerData")) {
     return;
@@ -784,6 +806,7 @@ export function ensureCoreSchema(
   const legacyShapeHandling = options.legacyShapeHandling ?? "fail-fast";
 
   database.exec(CORE_SCHEMA_SQL);
+  ensureBattleAttackLimitColumn(database);
 
   if (legacyShapeHandling === "repair") {
     rebuildClanDataWithoutLegacyReserveColumns(database);

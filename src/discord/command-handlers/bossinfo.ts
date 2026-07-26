@@ -58,6 +58,7 @@ type BossInfoWizardService = Pick<
   | "submitPhaseCount"
   | "submitBoundaries"
   | "submitHp"
+  | "previewSave"
   | "save"
   | "cancel"
 >;
@@ -232,9 +233,11 @@ function parseBossInfoButtonCustomId(customId: string): BossInfoButtonCustomIdPa
 
   if (
     action !== "start" &&
+    action !== "open-phase-count" &&
     action !== "cancel" &&
     action !== "open-boundary" &&
     action !== "open-hp" &&
+    action !== "preview-save" &&
     action !== "save"
   ) {
     return null;
@@ -437,6 +440,7 @@ function requireWizardService(
     typeof service.submitPhaseCount === "function" &&
     typeof service.submitBoundaries === "function" &&
     typeof service.submitHp === "function" &&
+    typeof service.previewSave === "function" &&
     typeof service.save === "function" &&
     typeof service.cancel === "function"
   );
@@ -527,7 +531,7 @@ export async function handleBossInfoButtonInteraction(
 
   const request = createWizardSessionRequest(interaction);
 
-  if (customId.action === "start") {
+  if (customId.action === "start" || customId.action === "open-phase-count") {
     const result = service.openPhaseCountModal(request);
     if (result.kind === "message") {
       await updateBossInfoWizard(interaction, result);
@@ -622,6 +626,11 @@ export async function handleBossInfoButtonInteraction(
         ),
       ),
     );
+    return;
+  }
+
+  if (customId.action === "preview-save") {
+    await updateBossInfoWizard(interaction, service.previewSave(request));
     return;
   }
 

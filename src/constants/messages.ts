@@ -7,6 +7,7 @@ export const COMMAND_DESCRIPTIONS = {
   bossinfoExportJson: "このサーバーのボスHP/段階設定をJSONで出力します。",
   bossinfoEdit: "サーバーごとのボスHP/段階設定をウィザードで編集します。",
   lap: "周回数を変更します",
+  agent: "代理操作パネルを表示します。",
   attackDeclare: "ボスに凸宣言した時の処理を実施します",
   attackFin: "ボスに凸した時の処理を実施します。",
   defeatBoss: "ボスを討伐した時の処理を実施します。",

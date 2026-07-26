@@ -349,7 +349,7 @@ describe("bossinfo wizard discord handlers", () => {
 
     expect(modal.deferredUpdates).toBe(1);
     expect(wizardMessage.edits).toHaveLength(1);
-    expect(wizardMessage.edits[0]?.content).toContain("境界入力 1/1");
+    expect(wizardMessage.edits[0]?.content).toContain("段階数を下書きに反映しました");
     expect(wizardMessage.edits[0]?.components?.[0]).toMatchObject({
       components: expect.arrayContaining([
         expect.objectContaining({
@@ -388,7 +388,7 @@ describe("bossinfo wizard discord handlers", () => {
     expect(modal.replies[0]).toMatchObject({
       ephemeral: true,
     });
-    expect(modal.replies[0]?.content).toContain("境界入力 1/1");
+    expect(modal.replies[0]?.content).toContain("段階数を下書きに反映しました");
   });
 
   it("opens boundary and hp modals from wizard buttons", async () => {
@@ -449,7 +449,7 @@ describe("bossinfo wizard discord handlers", () => {
         guildId: "123456789012345678",
         userId: "111",
         kind: "hp",
-        bossIndex: 0,
+        bossIndex: -1,
         startIndex: 0,
         endIndex: 3,
       }),
@@ -492,25 +492,31 @@ describe("bossinfo wizard discord handlers", () => {
       }).interaction,
     );
 
-    const hpValues = ["1200", "1500", "2000", "2300", "3000"];
-    for (let bossIndex = 0; bossIndex < hpValues.length; bossIndex += 1) {
-      await router.handle(
-        createModalInteraction({
-          customId: createBossInfoModalCustomId({
-            guildId: "123456789012345678",
-            userId: "111",
-            kind: "hp",
-            bossIndex,
-            startIndex: 0,
-            endIndex: 0,
-          }),
-          values: [hpValues[bossIndex]!],
-          message: wizardMessage,
-        }).interaction,
-      );
-    }
+    await router.handle(
+      createModalInteraction({
+        customId: createBossInfoModalCustomId({
+          guildId: "123456789012345678",
+          userId: "111",
+          kind: "hp",
+          bossIndex: -1,
+          startIndex: 0,
+          endIndex: 0,
+        }),
+        values: ["1200 1500 2000 2300 3000"],
+        message: wizardMessage,
+      }).interaction,
+    );
 
-    expect(wizardMessage.edits.at(-1)?.content).toContain("保存前プレビュー");
+    const previewButton = createButtonInteraction({
+      customId: createBossInfoButtonCustomId({
+        guildId: "123456789012345678",
+        userId: "111",
+        action: "preview-save",
+      }),
+    });
+    await router.handle(previewButton.interaction);
+
+    expect(previewButton.updates[0]?.content).toContain("保存前プレビュー");
 
     const saveButton = createButtonInteraction({
       customId: createBossInfoButtonCustomId({

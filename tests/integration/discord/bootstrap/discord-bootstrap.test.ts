@@ -7,6 +7,7 @@ import {
   IntentsBitField,
   MessageFlags,
   Partials,
+  type AnySelectMenuInteraction,
   type BaseInteraction,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
@@ -53,7 +54,14 @@ function createMemoryLogger(): { logger: Logger; records: Array<{ level: string;
 
 function createBaseInteractionStub(): Pick<
   BaseInteraction,
-  "channelId" | "guildId" | "isButton" | "isChatInputCommand" | "isModalSubmit" | "isRepliable" | "user"
+  | "channelId"
+  | "guildId"
+  | "isAnySelectMenu"
+  | "isButton"
+  | "isChatInputCommand"
+  | "isModalSubmit"
+  | "isRepliable"
+  | "user"
 > {
   return {
     guildId: "123456789012345678",
@@ -62,6 +70,7 @@ function createBaseInteractionStub(): Pick<
       id: "323456789012345678",
     } as BaseInteraction["user"],
     isChatInputCommand: () => false,
+    isAnySelectMenu: () => false,
     isButton: () => false,
     isModalSubmit: () => false,
     isRepliable: () => true,
@@ -112,6 +121,7 @@ describe("discord bootstrap", () => {
       ["bossinfo_export_json", "このサーバーのボスHP/段階設定をJSONで出力します。"],
       ["bossinfo_edit", "サーバーごとのボスHP/段階設定をウィザードで編集します。"],
       ["lap", "周回数を変更します"],
+      ["agent", "代理操作パネルを表示します。"],
       ["attack_declare", "ボスに凸宣言した時の処理を実施します"],
       ["attack_fin", "ボスに凸した時の処理を実施します。"],
       ["defeat_boss", "ボスを討伐した時の処理を実施します。"],
@@ -123,7 +133,7 @@ describe("discord bootstrap", () => {
       ["correct_attack_kind", "自分の攻撃の本戦・持越区分を入れ替えます。"],
       ["admin_correct_attack_kind", "メンバー指定で攻撃の本戦・持越区分を入れ替えます。"],
     ]);
-    expect(SLASH_COMMAND_PAYLOADS).toHaveLength(17);
+    expect(SLASH_COMMAND_PAYLOADS).toHaveLength(18);
     expect(SLASH_COMMAND_PAYLOADS.find((payload) => payload.name === "time")?.options).toEqual([
       {
         type: 3,
@@ -316,13 +326,16 @@ describe("discord bootstrap", () => {
     expect(records.some((record) => record.level === "error")).toBe(true);
   });
 
-  it("routes button and modal handlers by custom id matcher", async () => {
+  it("routes button, select menu, and modal handlers by custom id matcher", async () => {
     const { logger } = createMemoryLogger();
     const router = new InteractionRouter({ logger });
     const calls: string[] = [];
 
     router.registerButtonHandler(/^bossinfo:/u, async () => {
       calls.push("button");
+    });
+    router.registerSelectMenuHandler(/^agent:/u, async () => {
+      calls.push("select");
     });
     router.registerModalHandler("bossinfo:phase-count", async () => {
       calls.push("modal");
@@ -333,6 +346,11 @@ describe("discord bootstrap", () => {
       customId: "bossinfo:start",
       isButton: () => true,
     } as unknown as ButtonInteraction;
+    const selectMenuInteraction = {
+      ...createBaseInteractionStub(),
+      customId: "agent:member:123456789012345678",
+      isAnySelectMenu: () => true,
+    } as unknown as AnySelectMenuInteraction;
     const modalInteraction = {
       ...createBaseInteractionStub(),
       customId: "bossinfo:phase-count",
@@ -340,9 +358,10 @@ describe("discord bootstrap", () => {
     } as unknown as ModalSubmitInteraction;
 
     await router.handle(buttonInteraction);
+    await router.handle(selectMenuInteraction);
     await router.handle(modalInteraction);
 
-    expect(calls).toEqual(["button", "modal"]);
+    expect(calls).toEqual(["button", "select", "modal"]);
   });
 
   it("documents privileged intents in the operations doc", () => {

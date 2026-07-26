@@ -305,6 +305,108 @@ describe("AttackService resolution", () => {
     });
   });
 
+  it("stores pending damage and uses it when the attack is finished later", async () => {
+    tempPath = createTempSqlitePath();
+    database = openSqliteDatabase({ filePath: tempPath.filePath });
+    createCoreRepositorySchema(database);
+
+    const runtimeStateService = new RuntimeStateService({ database });
+    const service = new AttackService({
+      database,
+      runtimeStateService,
+      clock: createFixedClock("2026-03-08T06:00:00+09:00"),
+    });
+
+    const clanData = createClanData();
+    seedLapOneState(database, clanData);
+    const playerData = new PlayerData({ userId: "333", physicsAttack: 1 });
+    seedPlayer(database, clanData, playerData);
+    seedDeclaredAttack(database, clanData, playerData, AttackType.BATTLE);
+    runtimeStateService.set(clanData);
+
+    const nextId = createSnowflakeFactory();
+    const responseChannel = new FakeTextChannel("response", nextId);
+    const bossChannel = new FakeTextChannel(clanData.bossChannelIds[0]!, nextId);
+    const summaryChannel = new FakeTextChannel(clanData.summaryChannelId, nextId);
+    const remainChannel = new FakeTextChannel(clanData.remainAttackChannelId, nextId);
+    bossChannel.attachMessage(new FakeEditableMessage("111"));
+    summaryChannel.attachMessage(new FakeEditableMessage("211"));
+    remainChannel.attachMessage(new FakeEditableMessage(clanData.remainAttackMessageId!));
+    const gateway = new FakeDiscordGateway();
+    [bossChannel, summaryChannel, remainChannel].forEach((channel) => gateway.registerChannel(channel));
+
+    const pendingResult = await service.setPendingDamage({
+      categoryId: clanData.categoryId,
+      channelId: clanData.bossChannelIds[0]!,
+      member: { id: playerData.userId, displayName: "Alice" },
+      damage: 345_678,
+      responseChannel,
+      discordGateway: gateway,
+      displayNamesByUserId: new Map([[playerData.userId, "Alice"]]),
+    });
+
+    const pendingAttackRow = database
+      .prepare<[], { attacked: bigint; damage: bigint }>(
+        "select max(attacked) as attacked, max(damage) as damage from AttackStatus",
+      )
+      .get();
+    const pendingEntryRow = database
+      .prepare<[], { status: string; damage: bigint | null }>(
+        "select status, damage from AttackEntry",
+      )
+      .get();
+    const pendingOperationLogRow = database
+      .prepare<[], { count: bigint }>("select count(*) as count from OperationLog")
+      .get();
+
+    expect(pendingResult?.attacked).toBe(false);
+    expect(pendingResult?.damage).toBe(345_678);
+    expect(pendingAttackRow).toEqual({
+      attacked: 0n,
+      damage: 345678n,
+    });
+    expect(pendingEntryRow).toEqual({
+      status: "declared",
+      damage: 345678n,
+    });
+    expect(pendingOperationLogRow?.count).toBe(0n);
+    expect(responseChannel.sentPayloads[0]?.content).toContain("345,678");
+    expect(bossChannel.messages.get("111")?.edits).toHaveLength(1);
+    expect(summaryChannel.messages.get("211")?.edits).toHaveLength(1);
+    expect(remainChannel.messages.get(clanData.remainAttackMessageId!)?.edits).toHaveLength(0);
+
+    const finishResult = await service.finish({
+      categoryId: clanData.categoryId,
+      channelId: clanData.bossChannelIds[0]!,
+      member: { id: playerData.userId, displayName: "Alice" },
+      responseChannel,
+      discordGateway: gateway,
+      displayNamesByUserId: new Map([[playerData.userId, "Alice"]]),
+    });
+
+    const finishedAttackRow = database
+      .prepare<[], { attacked: bigint; damage: bigint }>(
+        "select max(attacked) as attacked, max(damage) as damage from AttackStatus",
+      )
+      .get();
+    const finishedEntryRow = database
+      .prepare<[], { status: string; damage: bigint | null }>(
+        "select status, damage from AttackEntry",
+      )
+      .get();
+
+    expect(finishResult?.attacked).toBe(true);
+    expect(finishResult?.damage).toBe(345_678);
+    expect(finishedAttackRow).toEqual({
+      attacked: 1n,
+      damage: 345678n,
+    });
+    expect(finishedEntryRow).toEqual({
+      status: "finished",
+      damage: 345678n,
+    });
+  });
+
   it("recreates a missing current remain-attack message instead of failing finish", async () => {
     tempPath = createTempSqlitePath();
     database = openSqliteDatabase({ filePath: tempPath.filePath });
@@ -837,8 +939,8 @@ describe("AttackService resolution", () => {
       .prepare<[], { count: bigint }>("select count(*) as count from CarryOver")
       .get();
     const attackEntryRows = database
-      .prepare<[], { user_id: bigint; status: string }>(
-        "select user_id, status from AttackEntry order by user_id asc",
+      .prepare<[], { user_id: bigint; status: string; damage: bigint | null }>(
+        "select user_id, status, damage from AttackEntry order by user_id asc",
       )
       .all();
     const operationLogRows = database
@@ -858,7 +960,7 @@ describe("AttackService resolution", () => {
     expect(summaryRow?.count).toBe(1n);
     expect(carryOverRow?.count).toBe(1n);
     expect(attackEntryRows).toEqual([
-      { user_id: 333n, status: "defeated" },
+      { user_id: 333n, status: "defeated", damage: 600000n },
     ]);
     expect(operationLogRows.map((row) => row.operation_type)).toEqual(["defeat"]);
     expect(bossChannel.sentMessages).toHaveLength(1);

@@ -2,7 +2,9 @@ import type { ChatInputCommandInteraction } from "discord.js";
 
 import { ResourceAdjustmentType } from "../../domain/resource-adjustment.js";
 import type { ClanQueryService } from "../../services/clan-query-service.js";
+import type { MemberService } from "../../services/member-service.js";
 import type { RuntimeStateService } from "../../services/runtime-state-service.js";
+import { cleanupDepartedMembersOnDateRollover } from "../day-rollover-departed-member-cleanup.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import {
   DiscordGuildTextGateway,
@@ -16,7 +18,8 @@ import {
 
 export interface QueryCommandHandlersOptions {
   clanQueryService: Pick<ClanQueryService, "setLap" | "calcCarryOver" | "adjustRemainAttackCount">;
-  runtimeStateService: Pick<RuntimeStateService, "get">;
+  memberService: Pick<MemberService, "remove">;
+  runtimeStateService: Pick<RuntimeStateService, "get" | "ensureDateUpToDate">;
 }
 
 function createQueryResponseChannel(interaction: ChatInputCommandInteraction): SlashResponseChannelAdapter {
@@ -39,6 +42,14 @@ export async function handleLapCommand(
   const managedContext = await resolveManagedInteractionContext(interaction);
   const categoryId = managedContext.categoryId ?? interaction.channelId;
   const bossNumber = interaction.options.getInteger("boss_number");
+  const discordGateway = new DiscordGuildTextGateway(interaction.guild);
+  await cleanupDepartedMembersOnDateRollover({
+    runtimeStateService: options.runtimeStateService,
+    memberService: options.memberService,
+    guild: interaction.guild,
+    categoryId,
+    discordGateway,
+  });
   const clanData = options.runtimeStateService.get(categoryId);
 
   await options.clanQueryService.setLap({
@@ -47,7 +58,7 @@ export async function handleLapCommand(
     lap: interaction.options.getInteger("lap", true),
     ...(bossNumber !== null ? { bossNumber } : {}),
     responseChannel: createQueryResponseChannel(interaction),
-    discordGateway: new DiscordGuildTextGateway(interaction.guild),
+    discordGateway,
     displayNamesByUserId: clanData
       ? await resolveGuildDisplayNamesForUserIds(interaction.guild, clanData.playerDataMap.keys())
       : resolveCachedGuildDisplayNames(interaction.guild),
@@ -78,6 +89,14 @@ export async function handleAdjustRemainAttackCountCommand(
 
   const managedContext = await resolveManagedInteractionContext(interaction);
   const categoryId = managedContext.categoryId ?? interaction.channelId;
+  const discordGateway = new DiscordGuildTextGateway(interaction.guild);
+  await cleanupDepartedMembersOnDateRollover({
+    runtimeStateService: options.runtimeStateService,
+    memberService: options.memberService,
+    guild: interaction.guild,
+    categoryId,
+    discordGateway,
+  });
   const clanData = options.runtimeStateService.get(categoryId);
   const member = await resolveMemberIdentity(interaction.guild, interaction.options.getUser("member", true));
   const actor = await resolveMemberIdentity(interaction.guild, interaction.user);
@@ -94,7 +113,7 @@ export async function handleAdjustRemainAttackCountCommand(
         : ResourceAdjustmentType.CARRYOVER,
     remaining: interaction.options.getInteger("remaining", true),
     responseChannel: createQueryResponseChannel(interaction),
-    discordGateway: new DiscordGuildTextGateway(interaction.guild),
+    discordGateway,
     displayNamesByUserId: clanData
       ? await resolveGuildDisplayNamesForUserIds(interaction.guild, clanData.playerDataMap.keys())
       : resolveCachedGuildDisplayNames(interaction.guild),

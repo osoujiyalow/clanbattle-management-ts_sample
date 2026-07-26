@@ -13,6 +13,7 @@ interface PlayerDataRow {
   physics_attack: bigint;
   magic_attack: bigint;
   battle_attack_count: bigint;
+  battle_attack_limit: bigint | null;
   task_kill: bigint | number | boolean;
 }
 
@@ -22,14 +23,16 @@ const INSERT_PLAYER_DATA_SQL = `insert or ignore into PlayerData (
   physics_attack,
   magic_attack,
   battle_attack_count,
+  battle_attack_limit,
   task_kill
-) values (?, ?, 0, 0, 0, 0)`;
+) values (?, ?, 0, 0, 0, ?, 0)`;
 
 const UPDATE_PLAYER_DATA_SQL = `update PlayerData
 set
   physics_attack=?,
   magic_attack=?,
   battle_attack_count=?,
+  battle_attack_limit=?,
   task_kill=?
 where
   category_id=? and user_id=?`;
@@ -59,6 +62,7 @@ const SELECT_ALL_PLAYER_DATA_SQL = "select * from PlayerData";
 function mapPlayerDataRowToDomain(row: PlayerDataRow): PlayerData {
   return PlayerData.fromRecord({
     userId: decodeSnowflake(row.user_id),
+    battleAttackLimit: Number(row.battle_attack_limit ?? 3n),
     battleAttackCount: Number(row.battle_attack_count),
     physicsAttack: Number(row.physics_attack),
     magicAttack: Number(row.magic_attack),
@@ -76,7 +80,11 @@ export class PlayerRepository {
     const statement = this.database.prepare(INSERT_PLAYER_DATA_SQL);
 
     for (const playerData of playerDataList) {
-      statement.run(encodeSnowflake(categoryId), encodeSnowflake(playerData.userId));
+      statement.run(
+        encodeSnowflake(categoryId),
+        encodeSnowflake(playerData.userId),
+        playerData.battleAttackLimit,
+      );
     }
   }
 
@@ -85,6 +93,7 @@ export class PlayerRepository {
       playerData.physicsAttack,
       playerData.magicAttack,
       playerData.battleAttackCount,
+      playerData.battleAttackLimit,
       encodeSqliteBoolean(playerData.taskKill),
       encodeSnowflake(categoryId),
       encodeSnowflake(playerData.userId),

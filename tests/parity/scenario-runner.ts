@@ -787,28 +787,15 @@ async function runBossInfoEditScenario(): Promise<ParityScenarioResult> {
       throw new Error("Unexpected hp context error");
     }
 
-    let wizardStep = service.submitHp({
+    const afterHp = service.submitHp({
       ...requestBase,
-      values: ["5600"],
+      values: ["5600 1500 2000 2300 3000"],
       bossIndex: hpContext.bossIndex,
       startIndex: hpContext.startIndex,
       endIndex: hpContext.endIndex,
     });
 
-    for (let remainingBosses = 0; remainingBosses < 4; remainingBosses += 1) {
-      const nextContext = service.getCurrentHpContext(requestBase);
-      if ("kind" in nextContext) {
-        throw new Error("Unexpected follow-up hp context error");
-      }
-
-      wizardStep = service.submitHp({
-        ...requestBase,
-        values: [""],
-        bossIndex: nextContext.bossIndex,
-        startIndex: nextContext.startIndex,
-        endIndex: nextContext.endIndex,
-      });
-    }
+    const preview = service.previewSave(requestBase);
 
     const saved = service.save(requestBase);
     const configMap = repository.loadAll();
@@ -829,14 +816,16 @@ async function runBossInfoEditScenario(): Promise<ParityScenarioResult> {
             start.content,
             afterPhaseCount.content,
             afterBoundaries.content,
-            wizardStep.content,
+            afterHp.content,
+            preview.content,
             saved.content,
           ],
           components: [
             phaseModal.kind,
             boundaryModal.kind,
             hpModal.kind,
-            wizardStep.kind === "message" && wizardStep.view?.kind === "confirm" ? "confirm" : wizardStep.kind,
+            afterHp.kind === "message" && afterHp.view?.kind ? afterHp.view.kind : afterHp.kind,
+            preview.kind === "message" && preview.view?.kind === "confirm" ? "confirm" : preview.kind,
           ],
           modalTitles: [
             phaseModal.kind === "modal" ? phaseModal.title : "",

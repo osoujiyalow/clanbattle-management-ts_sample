@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   ActionRowBuilder,
   EmbedBuilder,
@@ -7,6 +9,10 @@ import type {
 import { USER_MESSAGES } from "../constants/messages.js";
 import { type ClanData } from "../domain/clan-data.js";
 import { PlayerData } from "../domain/player-data.js";
+import {
+  ResourceAdjustment,
+  ResourceAdjustmentType,
+} from "../domain/resource-adjustment.js";
 import { AttackEntryRepository } from "../repositories/sqlite/attack-entry-repository.js";
 import {
   ProgressMessageIdRepository,
@@ -18,7 +24,7 @@ import { OperationLogRepository } from "../repositories/sqlite/operation-log-rep
 import { PlayerRepository } from "../repositories/sqlite/player-repository.js";
 import { ResourceAdjustmentRepository } from "../repositories/sqlite/resource-adjustment-repository.js";
 import type { Logger } from "../shared/logger.js";
-import { type Clock, systemClock } from "../shared/time.js";
+import { type Clock, now, systemClock } from "../shared/time.js";
 import { DEFAULT_DISCORD_MESSAGE_RETRY_DELAY_MS } from "./discord-message-retry.js";
 import { MemberServiceMessageCoordinator } from "./member-service-message-coordinator.js";
 import type { RuntimeStateService } from "./runtime-state-service.js";
@@ -157,6 +163,10 @@ interface ProgressTarget {
 export interface AddMembersRequest extends MemberServiceBaseRequest {
   role?: MemberRole;
   member?: MemberIdentity;
+}
+
+export interface IncreaseBattleAttackLimitRequest extends MemberServiceBaseRequest {
+  member: MemberIdentity;
 }
 
 export interface RemoveMembersRequest extends MemberServiceBaseRequest {
@@ -370,6 +380,7 @@ export class MemberService {
         runInTransaction(this.options.database, () => {
           this.playerRepository.insertMany(refreshedClanData.categoryId, playerDataList);
         });
+        this.options.runtimeStateService.notifyCategoryStateChanged(refreshedClanData.categoryId);
       }
 
       await this.updateRemainAttackMessage(
@@ -388,6 +399,105 @@ export class MemberService {
       );
 
       return playerDataList.length;
+    });
+  }
+
+  async increaseBattleAttackLimit(
+    request: IncreaseBattleAttackLimitRequest,
+  ): Promise<number | null> {
+    return this.changeBattleAttackLimit(request, 3);
+  }
+
+  async decreaseBattleAttackLimit(
+    request: IncreaseBattleAttackLimitRequest,
+  ): Promise<number | null> {
+    return this.changeBattleAttackLimit(request, -3);
+  }
+
+  private async changeBattleAttackLimit(
+    request: IncreaseBattleAttackLimitRequest,
+    delta: 3 | -3,
+  ): Promise<number | null> {
+    return this.options.runtimeStateService.withCategoryLock(request.categoryId, async () => {
+      const clanData = this.options.runtimeStateService.get(request.categoryId);
+      const dayGuardResult = clanData
+        ? this.options.runtimeStateService.ensureDateUpToDateLocked(request.categoryId, this.clock)
+        : null;
+      const currentClanData = this.options.runtimeStateService.get(request.categoryId);
+      if (
+        currentClanData &&
+        (dayGuardResult?.shouldCreateRemainAttackMessage || !currentClanData.remainAttackMessageId)
+      ) {
+        await this.createCurrentRemainAttackMessage(currentClanData, request);
+      }
+      await this.ensureCurrentSummaryMessage(currentClanData, request);
+
+      const refreshedClanData = this.options.runtimeStateService.get(request.categoryId);
+      const playerData = refreshedClanData?.getPlayerData(request.member.id);
+      if (!refreshedClanData || !playerData) {
+        return null;
+      }
+
+      const playerResourceState = this.options.runtimeStateService.getPlayerResourceState(
+        refreshedClanData.categoryId,
+        playerData.userId,
+        refreshedClanData.date,
+      );
+      const occupiedBattleAttackCount =
+        (playerResourceState?.battleReservedCount ?? 0) +
+        (playerResourceState?.battleConsumedCount ?? playerData.battleAttackCount);
+      const nextBattleAttackLimit = playerData.battleAttackLimit + delta;
+      if (nextBattleAttackLimit < 3 || occupiedBattleAttackCount > nextBattleAttackLimit) {
+        return null;
+      }
+
+      const latestBattleAdjustment = this.resourceAdjustmentRepository
+        .findAllByCategory(refreshedClanData.categoryId)
+        .filter(
+          (adjustment) =>
+            adjustment.userId === playerData.userId &&
+            adjustment.dayKey === refreshedClanData.date &&
+            adjustment.resourceType === ResourceAdjustmentType.BATTLE,
+        )
+        .at(-1);
+      if (latestBattleAdjustment && latestBattleAdjustment.remaining + delta < 0) {
+        return null;
+      }
+      const transitionAt = now(this.clock);
+      playerData.battleAttackLimit = nextBattleAttackLimit;
+      runInTransaction(this.options.database, () => {
+        this.playerRepository.update(refreshedClanData.categoryId, playerData);
+        if (latestBattleAdjustment) {
+          this.resourceAdjustmentRepository.insert(
+            new ResourceAdjustment({
+              adjustmentId: randomUUID(),
+              categoryId: refreshedClanData.categoryId,
+              userId: playerData.userId,
+              actorUserId: request.actor.id,
+              dayKey: refreshedClanData.date,
+              resourceType: ResourceAdjustmentType.BATTLE,
+              remaining: latestBattleAdjustment.remaining + delta,
+              occurredAt: transitionAt,
+            }),
+          );
+        }
+        this.options.runtimeStateService.syncProjectedStateForCategory(
+          refreshedClanData.categoryId,
+          refreshedClanData.date,
+          transitionAt,
+        );
+      });
+
+      const displayNamesByUserId = cloneDisplayNamesMap(request.displayNamesByUserId);
+      mergeDisplayName(displayNamesByUserId, request.member);
+      const renderContext = {
+        ...request,
+        displayNamesByUserId,
+      };
+      await this.updateRemainAttackMessage(refreshedClanData, renderContext);
+      await this.updateSummaryMessage(refreshedClanData, renderContext);
+
+      return playerData.battleAttackLimit;
     });
   }
 

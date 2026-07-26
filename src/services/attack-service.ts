@@ -178,6 +178,10 @@ export interface DefeatBossRequest extends AttackServiceBaseRequest {
   selectCarryOver?: AttackCarryOverSelector;
 }
 
+export interface SetPendingDamageRequest extends AttackServiceBaseRequest {
+  damage: number;
+}
+
 export interface UndoAttackRequest extends AttackRenderContext {
   categoryId: string;
   channelId?: string;
@@ -324,7 +328,10 @@ export class AttackService {
       const carryAvailableCount =
         playerResourceState?.carryAvailableCount ?? playerData.carryOverList.length;
 
-      if (parsedAttackType === AttackType.BATTLE && occupiedBattleCount >= 3) {
+      if (
+        parsedAttackType === AttackType.BATTLE &&
+        occupiedBattleCount >= playerData.battleAttackLimit
+      ) {
         await sendAttackResponse(
           request.responseChannel,
           {
@@ -687,6 +694,67 @@ export class AttackService {
     });
   }
 
+  async setPendingDamage(request: SetPendingDamageRequest): Promise<AttackStatus | null> {
+    return this.options.runtimeStateService.withCategoryLock(request.categoryId, async () => {
+      const dayGuardResult = this.options.runtimeStateService.get(request.categoryId)
+        ? this.options.runtimeStateService.ensureDateUpToDateLocked(request.categoryId, this.clock)
+        : null;
+      const currentClanData = this.options.runtimeStateService.get(request.categoryId);
+      await this.ensureCurrentRemainAttackMessage(currentClanData, dayGuardResult, request);
+      await this.ensureCurrentSummaryMessage(currentClanData, dayGuardResult, request);
+
+      if (!Number.isInteger(request.damage) || request.damage <= 0) {
+        await request.responseChannel.send({
+          content: "ダメージは1以上の整数で入力してください。",
+        });
+        return null;
+      }
+
+      const validation = await this.validateAttackRequest(request);
+      if (!validation) {
+        return null;
+      }
+
+      const resolution = await this.resolveDeclaredAttack(validation, request);
+      if (!resolution) {
+        return null;
+      }
+
+      resolution.attackStatus.damage = request.damage;
+      const transitionAt = now(this.clock);
+
+      runInTransaction(this.options.database, () => {
+        this.attackStatusRepository.update(
+          resolution.clanData.categoryId,
+          resolution.lap,
+          resolution.bossIndex,
+          resolution.attackStatus,
+        );
+        this.upsertAttackEntrySnapshot(
+          resolution.clanData.categoryId,
+          resolution.clanData.date,
+          resolution.lap,
+          resolution.bossIndex,
+          resolution.attackStatus,
+        );
+        this.syncProjectedStateForCategory(
+          resolution.clanData.categoryId,
+          resolution.clanData.date,
+          transitionAt,
+        );
+      });
+
+      await request.responseChannel.send({
+        content: `${request.member.displayName}の${resolution.lap}周目${resolution.bossIndex + 1}ボスのダメージを${request.damage.toLocaleString("en-US")}に設定しました。`,
+      });
+      await this.updateProgressMessages(resolution.clanData, resolution.lap, resolution.bossIndex, request);
+      await this.syncNonProgressMessages(resolution.clanData, request, {
+        updateSummary: true,
+      });
+      return resolution.attackStatus;
+    });
+  }
+
   async undo(request: UndoAttackRequest): Promise<boolean> {
     return this.options.runtimeStateService.withCategoryLock(request.categoryId, async () => {
       const dayGuardResult = this.options.runtimeStateService.get(request.categoryId)
@@ -752,6 +820,7 @@ export class AttackService {
               clanData.date,
             ),
             operationLogs,
+            battleAttackLimit: playerData.battleAttackLimit,
           })
         ) {
           await sendAttackResponse(
@@ -983,6 +1052,7 @@ export class AttackService {
         sameDayAttackEntries,
         sameDayResourceAdjustments,
         targetAttackEntryId: targetAttackEntry.attackEntryId,
+        battleAttackLimit: playerData.battleAttackLimit,
       });
       if (correctionPreparation.kind === "target-not-found") {
         await request.responseChannel.send({

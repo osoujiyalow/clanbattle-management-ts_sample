@@ -1,7 +1,9 @@
 import type { Guild, Message } from "discord.js";
 
 import type { AttackService } from "../../services/attack-service.js";
+import type { MemberService } from "../../services/member-service.js";
 import type { RuntimeStateService } from "../../services/runtime-state-service.js";
+import { cleanupDepartedMembersOnDateRollover } from "../day-rollover-departed-member-cleanup.js";
 import {
   DiscordGuildTextGateway,
   resolveGuildDisplayNamesForUserIds,
@@ -14,7 +16,8 @@ export type DiscordMessageCreateHandler = (message: Message) => Promise<void>;
 
 export interface MessageCreateHandlerOptions {
   attackService: Pick<AttackService, "applyMessageDamage">;
-  runtimeStateService: Pick<RuntimeStateService, "get">;
+  memberService?: Pick<MemberService, "remove">;
+  runtimeStateService: Pick<RuntimeStateService, "get" | "ensureDateUpToDate">;
   createDiscordGateway?: (guild: Guild) => DiscordGuildTextGateway;
   resolveDisplayNames?: (guild: Guild) => Promise<ReadonlyMap<string, string>>;
 }
@@ -40,6 +43,19 @@ export function createMessageCreateHandler(
       return;
     }
 
+    const discordGateway =
+      options.createDiscordGateway?.(message.guild) ?? new DiscordGuildTextGateway(message.guild);
+    if (options.memberService) {
+      await cleanupDepartedMembersOnDateRollover({
+        runtimeStateService: options.runtimeStateService,
+        memberService: options.memberService,
+        guild: message.guild,
+        categoryId: parentId,
+        discordGateway,
+        ...(options.resolveDisplayNames ? { resolveDisplayNames: options.resolveDisplayNames } : {}),
+      });
+    }
+
     const clanData = options.runtimeStateService.get(parentId);
     const displayNamesByUserId = new Map(
       await (options.resolveDisplayNames?.(message.guild) ??
@@ -57,8 +73,7 @@ export function createMessageCreateHandler(
         id: message.author.id,
         displayName: getMessageAuthorDisplayName(message),
       },
-      discordGateway:
-        options.createDiscordGateway?.(message.guild) ?? new DiscordGuildTextGateway(message.guild),
+      discordGateway,
       displayNamesByUserId,
     });
   };

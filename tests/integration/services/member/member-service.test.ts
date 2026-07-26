@@ -10,6 +10,10 @@ import { ATTACK_TYPE_INPUTS, AttackType } from "../../../../src/domain/attack-ty
 import { ClanData } from "../../../../src/domain/clan-data.js";
 import { OperationLog, OperationLogType } from "../../../../src/domain/operation-log.js";
 import { CarryOver, PlayerData } from "../../../../src/domain/player-data.js";
+import {
+  ResourceAdjustment,
+  ResourceAdjustmentType,
+} from "../../../../src/domain/resource-adjustment.js";
 import { AttackEntryRepository } from "../../../../src/repositories/sqlite/attack-entry-repository.js";
 import { AttackStatusRepository } from "../../../../src/repositories/sqlite/attack-status-repository.js";
 import { CarryOverRepository } from "../../../../src/repositories/sqlite/carry-over-repository.js";
@@ -21,6 +25,7 @@ import {
 } from "../../../../src/repositories/sqlite/db.js";
 import { OperationLogRepository } from "../../../../src/repositories/sqlite/operation-log-repository.js";
 import { PlayerRepository } from "../../../../src/repositories/sqlite/player-repository.js";
+import { ResourceAdjustmentRepository } from "../../../../src/repositories/sqlite/resource-adjustment-repository.js";
 import {
   MemberService,
   type MemberDiscordGateway,
@@ -372,6 +377,114 @@ describe("MemberService", () => {
     expect(runtimeStateService.get(clanData.categoryId)?.playerDataMap.size).toBe(2);
     expect(remainAttackMessage.edits).toHaveLength(1);
     expect(summaryMessage.edits).toHaveLength(1);
+  });
+
+  it("increases an existing member's battle limit and preserves it across day rollover", async () => {
+    tempPath = createTempSqlitePath();
+    database = openSqliteDatabase({ filePath: tempPath.filePath });
+    createCoreRepositorySchema(database);
+
+    const runtimeStateService = new RuntimeStateService({ database });
+    const service = new MemberService({
+      database,
+      runtimeStateService,
+      clock: createFixedClock("2026-03-08T06:00:00+09:00"),
+    });
+
+    const clanData = createClanData();
+    const playerData = new PlayerData({
+      userId: "444444444444444444",
+      battleAttackCount: 2,
+    });
+    new ClanRepository(database).insert(clanData);
+    new PlayerRepository(database).insertMany(clanData.categoryId, [playerData]);
+    new PlayerRepository(database).update(clanData.categoryId, playerData);
+    const resourceAdjustmentRepository = new ResourceAdjustmentRepository(database);
+    resourceAdjustmentRepository.insert(
+      new ResourceAdjustment({
+        adjustmentId: "adjustment-before-limit-increase",
+        categoryId: clanData.categoryId,
+        userId: playerData.userId,
+        actorUserId: "333333333333333333",
+        dayKey: clanData.date,
+        resourceType: ResourceAdjustmentType.BATTLE,
+        remaining: 1,
+        occurredAt: new Date("2026-03-08T05:30:00+09:00"),
+      }),
+    );
+    clanData.addPlayerData(playerData);
+    runtimeStateService.set(clanData);
+
+    const responseChannel = new FakeTextChannel("response");
+    const remainAttackChannel = new FakeTextChannel(clanData.remainAttackChannelId);
+    const remainAttackMessage = new FakeEditableMessage(clanData.remainAttackMessageId!);
+    const summaryChannel = new FakeTextChannel(clanData.summaryChannelId);
+    const summaryMessage = new FakeEditableMessage("223");
+    remainAttackChannel.attachMessage(remainAttackMessage);
+    summaryChannel.attachMessage(summaryMessage);
+
+    const gateway = new FakeDiscordGateway();
+    gateway.registerChannel(remainAttackChannel);
+    gateway.registerChannel(summaryChannel);
+
+    const result = await service.increaseBattleAttackLimit({
+      categoryId: clanData.categoryId,
+      actor: { id: "333333333333333333", displayName: "Invoker" },
+      member: { id: playerData.userId, displayName: "Bob" },
+      responseChannel,
+      discordGateway: gateway,
+    });
+
+    expect(result).toBe(6);
+    expect(playerData.battleAttackLimit).toBe(6);
+    expect(new PlayerRepository(database).findByCategoryId(clanData.categoryId).get(playerData.userId)?.battleAttackLimit).toBe(6);
+    expect(
+      resourceAdjustmentRepository
+        .findAllByCategory(clanData.categoryId)
+        .filter((adjustment) => adjustment.resourceType === ResourceAdjustmentType.BATTLE)
+        .at(-1)?.remaining,
+    ).toBe(4);
+
+    const decreasedResult = await service.decreaseBattleAttackLimit({
+      categoryId: clanData.categoryId,
+      actor: { id: "333333333333333333", displayName: "Invoker" },
+      member: { id: playerData.userId, displayName: "Bob" },
+      responseChannel,
+      discordGateway: gateway,
+    });
+    expect(decreasedResult).toBe(3);
+    expect(playerData.battleAttackLimit).toBe(3);
+
+    const belowMinimumResult = await service.decreaseBattleAttackLimit({
+      categoryId: clanData.categoryId,
+      actor: { id: "333333333333333333", displayName: "Invoker" },
+      member: { id: playerData.userId, displayName: "Bob" },
+      responseChannel,
+      discordGateway: gateway,
+    });
+    expect(belowMinimumResult).toBeNull();
+    expect(playerData.battleAttackLimit).toBe(3);
+
+    await service.increaseBattleAttackLimit({
+      categoryId: clanData.categoryId,
+      actor: { id: "333333333333333333", displayName: "Invoker" },
+      member: { id: playerData.userId, displayName: "Bob" },
+      responseChannel,
+      discordGateway: gateway,
+    });
+
+    await runtimeStateService.ensureDateUpToDate(
+      clanData.categoryId,
+      createFixedClock("2026-03-09T06:00:00+09:00"),
+    );
+
+    expect(playerData.battleAttackCount).toBe(0);
+    expect(playerData.battleAttackLimit).toBe(6);
+    const restored = new PlayerRepository(database)
+      .findByCategoryId(clanData.categoryId)
+      .get(playerData.userId);
+    expect(restored?.battleAttackCount).toBe(0);
+    expect(restored?.battleAttackLimit).toBe(6);
   });
 
   it("removes a member without progress activity and still redraws the summary totals", async () => {

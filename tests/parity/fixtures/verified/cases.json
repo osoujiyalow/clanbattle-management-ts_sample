@@ -491,9 +491,10 @@
       "expectedUi": {
         "visibility": "ephemeral",
         "messageSequence": [
-          "bossinfo 編集ウィザードを開始します。",
-          "境界入力 {chunk}/{total}",
-          "{boss_number}ボス HP入力 {chunk}/{total}",
+          "bossinfo 編集メニューを開きました。",
+          "段階数を下書きに反映しました。",
+          "境界を下書きに反映しました。",
+          "HPを下書きに反映しました。",
           "入力が完了しました。保存前プレビュー:",
           "bossinfo 設定を保存しました (SQLite)。"
         ],
@@ -501,6 +502,7 @@
           "phase-count modal",
           "boundary modal",
           "hp modal",
+          "edit menu buttons",
           "confirm buttons"
         ]
       },

@@ -50,6 +50,7 @@ describe("PlayerRepository", () => {
       repository.insertMany("200", [playerData]);
       playerData.physicsAttack = 1;
       playerData.magicAttack = 2;
+      playerData.battleAttackLimit = 6;
       playerData.taskKill = true;
       repository.update("200", playerData);
 
@@ -64,6 +65,7 @@ describe("PlayerRepository", () => {
       expect(loaded?.physicsAttack).toBe(1);
       expect(loaded?.magicAttack).toBe(2);
       expect(loaded?.taskKill).toBe(true);
+      expect(loaded?.battleAttackLimit).toBe(6);
       expect(row?.battle_attack_count).toBe(3n);
     } finally {
       closeSqliteDatabase(database);

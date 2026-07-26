@@ -1,6 +1,7 @@
 import { EmbedBuilder } from "discord.js";
 
 import type { BossStatusData } from "../domain/boss-status-data.js";
+import { ClanBattleData } from "../domain/clan-battle-data.js";
 import type { ClanData } from "../domain/clan-data.js";
 
 const SUMMARY_OVERVIEW_COLOR = 0x2ecc71;
@@ -50,7 +51,12 @@ function buildBossSummaryBlock(clanData: ClanData, bossIndex: number): string {
   }
 
   const currentHp = resolveCurrentBossHp(bossStatusData);
-  return `${bossIndex + 1}ボス（${lap}周）\n${currentHp}万/${bossStatusData.maxHp}万`;
+  const phaseProgress = ClanBattleData.getPhaseProgress(lap, clanData.guildId);
+  const nextPhaseText =
+    phaseProgress.lapsUntilNextPhase === null
+      ? ""
+      : `次段階まで${phaseProgress.lapsUntilNextPhase}周`;
+  return `${bossIndex + 1}ボス（${lap}周）${nextPhaseText}\n${currentHp}万/${bossStatusData.maxHp}万`;
 }
 
 function buildRemainSummary(clanData: ClanData): string {
@@ -58,7 +64,7 @@ function buildRemainSummary(clanData: ClanData): string {
   let carryOverCount = 0;
 
   for (const playerData of clanData.playerDataMap.values()) {
-    remainAttackCount += 3 - playerData.battleAttackCount;
+    remainAttackCount += playerData.battleAttackLimit - playerData.battleAttackCount;
     carryOverCount += playerData.carryOverList.length;
   }
 

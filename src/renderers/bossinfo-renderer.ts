@@ -4,17 +4,12 @@ import type { GuildBossInfoConfig } from "../domain/guild-bossinfo-config.js";
 export type BossInfoSource = "custom(SQLite)" | "default";
 
 export function formatBossInfoSummary(config: GuildBossInfoConfig): string {
-  const lines = [`フェーズ数: ${config.boundaries.length}`, "境界:"];
+  const lines = [`フェーズ数: ${config.boundaries.length}`, "段階別設定 (HPは1〜5ボス順):"];
 
-  config.boundaries.forEach(([start, end], index) => {
-    lines.push(`  ${index + 1}段階: ${start}〜${end}`);
+  config.boundaries.forEach(([start, end], phaseIndex) => {
+    const phaseHp = config.hp[phaseIndex] ?? [];
+    lines.push(`  ${phaseIndex + 1}段階 ${start}〜${end}: ${phaseHp.join(" / ")}`);
   });
-
-  lines.push("HP:");
-  for (let bossIndex = 0; bossIndex < 5; bossIndex += 1) {
-    const phaseHps = config.hp.map((phase) => String(phase[bossIndex]));
-    lines.push(`  ${bossIndex + 1}ボス: ${phaseHps.join(" / ")}`);
-  }
 
   return lines.join("\n");
 }
@@ -32,17 +27,22 @@ export function getBossInfoChunkRange(
   return [startIndex, endIndex];
 }
 
-export function renderBossInfoIntroText(config: GuildBossInfoConfig): string {
-  return (
-    "bossinfo 編集ウィザードを開始します。\n" +
-    "この設定は guild 単位で保存され、SQLite を正本として管理されます。\n\n" +
-    "入力ルール:\n" +
-    "- 空欄で送信した場合は、既存値を維持します（新しく増やしたフェーズは空欄不可）\n" +
-    "- 境界の入力形式: `開始周 終了周`（例: `7 22` / 最終段階は `23 -1`）\n" +
-    "- HP は正の整数で入力します\n" +
-    `- 現在のフェーズ数: ${config.boundaries.length}\n\n` +
-    "まずフェーズ数を確認/変更します。"
-  );
+export function renderBossInfoIntroText(
+  config: GuildBossInfoConfig,
+  notice = "bossinfo 編集メニューを開きました。",
+): string {
+  return [
+    notice,
+    "この設定は guild 単位で保存され、SQLite を正本として管理されます。",
+    "保存確認を押すまでは、このサーバーの設定には反映されません。",
+    "",
+    "必要な項目だけ編集できます。",
+    "- 段階数: 段階を増減します",
+    "- 境界: `開始周 終了周` 形式で編集します（最終段階は `23 -1`）",
+    "- HP: 各段階の `1ボス 2ボス 3ボス 4ボス 5ボス` をまとめて編集します",
+    "",
+    formatBossInfoSummary(config),
+  ].join("\n");
 }
 
 export function renderBossInfoShowMessage(
@@ -84,16 +84,16 @@ export function renderBossInfoBoundaryPrompt(
 
 export function renderBossInfoHpPrompt(
   config: GuildBossInfoConfig,
-  bossIndex: number,
+  _bossIndex: number,
   chunkIndex: number,
 ): string {
   const totalChunks = getBossInfoTotalPhaseChunks(config);
   const [startIndex, endIndex] = getBossInfoChunkRange(chunkIndex, config.boundaries.length);
 
   return [
-    `${bossIndex + 1}ボス HP入力 ${chunkIndex + 1}/${totalChunks}`,
-    "入力形式: 各段階ごとに正の整数",
-    "記入例: `5600`",
+    `HP入力 ${chunkIndex + 1}/${totalChunks}`,
+    "入力形式: 各段階ごとに `1ボス 2ボス 3ボス 4ボス 5ボス` の順で正の整数",
+    "記入例: `1200 1500 2000 2300 3000`",
     "空欄: 既存値維持（新規フェーズは空欄不可）",
     `対象: ${startIndex + 1}段階目〜${endIndex + 1}段階目`,
   ].join("\n");

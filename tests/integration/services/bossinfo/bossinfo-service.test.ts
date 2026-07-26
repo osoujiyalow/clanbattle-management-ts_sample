@@ -173,7 +173,7 @@ describe("BossInfoService", () => {
     });
 
     expect(start.kind).toBe("message");
-    expect(start.view?.kind).toBe("start");
+    expect(start.view?.kind).toBe("menu");
     expect(phaseModal).toMatchObject({
       kind: "modal",
       title: "ボス情報書き換え: フェーズ数",
@@ -184,72 +184,53 @@ describe("BossInfoService", () => {
         },
       ],
     });
-    expect(afterPhaseCount.view?.kind).toBe("boundary");
+    expect(afterPhaseCount.view?.kind).toBe("menu");
+    expect(afterPhaseCount.content).toContain("段階数を下書きに反映しました");
     expect(boundaryModal).toMatchObject({
       kind: "modal",
       title: "ボス情報書き換え: 境界 (1-4段階)",
     });
-    expect(afterBoundaries.view?.kind).toBe("hp");
-    expect(afterBoundaries.content).toContain("1ボス HP入力 1/1");
+    expect(afterBoundaries.view?.kind).toBe("menu");
+    expect(afterBoundaries.content).toContain("境界を下書きに反映しました");
 
-    const hpValues = [
-      [
-        "\uFF11\uFF0C\uFF12\uFF10\uFF10",
-        "\uFF15\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF11\uFF10\uFF10\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF12\uFF10\uFF10\uFF0C\uFF10\uFF10\uFF10",
-      ],
-      [
-        "\uFF11\uFF0C\uFF15\uFF10\uFF10",
-        "\uFF15\uFF0C\uFF16\uFF10\uFF10",
-        "\uFF11\uFF10\uFF14\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF12\uFF10\uFF14\uFF0C\uFF10\uFF10\uFF10",
-      ],
-      [
-        "\uFF12\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF16\uFF0C\uFF14\uFF10\uFF10",
-        "\uFF11\uFF10\uFF18\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF12\uFF10\uFF18\uFF0C\uFF10\uFF10\uFF10",
-      ],
-      [
-        "\uFF12\uFF0C\uFF13\uFF10\uFF10",
-        "\uFF17\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF11\uFF11\uFF12\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF12\uFF11\uFF12\uFF0C\uFF10\uFF10\uFF10",
-      ],
-      [
-        "\uFF13\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF18\uFF0C\uFF15\uFF10\uFF10",
-        "\uFF11\uFF11\uFF16\uFF0C\uFF10\uFF10\uFF10",
-        "\uFF12\uFF11\uFF16\uFF0C\uFF10\uFF10\uFF10",
-      ],
+    const hpRows = [
+      "\uFF11\uFF0C\uFF12\uFF10\uFF10 \uFF11\uFF0C\uFF15\uFF10\uFF10 \uFF12\uFF0C\uFF10\uFF10\uFF10 \uFF12\uFF0C\uFF13\uFF10\uFF10 \uFF13\uFF0C\uFF10\uFF10\uFF10",
+      "\uFF15\uFF0C\uFF10\uFF10\uFF10 \uFF15\uFF0C\uFF16\uFF10\uFF10 \uFF16\uFF0C\uFF14\uFF10\uFF10 \uFF17\uFF0C\uFF10\uFF10\uFF10 \uFF18\uFF0C\uFF15\uFF10\uFF10",
+      "\uFF11\uFF10\uFF10\uFF0C\uFF10\uFF10\uFF10 \uFF11\uFF10\uFF14\uFF0C\uFF10\uFF10\uFF10 \uFF11\uFF10\uFF18\uFF0C\uFF10\uFF10\uFF10 \uFF11\uFF11\uFF12\uFF0C\uFF10\uFF10\uFF10 \uFF11\uFF11\uFF16\uFF0C\uFF10\uFF10\uFF10",
+      "\uFF12\uFF10\uFF10\uFF0C\uFF10\uFF10\uFF10 \uFF12\uFF10\uFF14\uFF0C\uFF10\uFF10\uFF10 \uFF12\uFF10\uFF18\uFF0C\uFF10\uFF10\uFF10 \uFF12\uFF11\uFF12\uFF0C\uFF10\uFF10\uFF10 \uFF12\uFF11\uFF16\uFF0C\uFF10\uFF10\uFF10",
     ] as const;
 
-    let lastResult = afterBoundaries;
-    for (let bossIndex = 0; bossIndex < hpValues.length; bossIndex += 1) {
-      const hpModal = service.openHpModal({
-        guildId: "123456789012345678",
-        userId: "111",
-        hasManageGuildPermission: true,
-      });
-      expect(hpModal).toMatchObject({
-        kind: "modal",
-        title: `ボス情報書き換え: ${bossIndex + 1}ボスHP (1-4段階)`,
-      });
+    const hpModal = service.openHpModal({
+      guildId: "123456789012345678",
+      userId: "111",
+      hasManageGuildPermission: true,
+    });
+    expect(hpModal).toMatchObject({
+      kind: "modal",
+      title: "ボス情報書き換え: HP (1-4段階)",
+    });
 
-      lastResult = service.submitHp({
-        guildId: "123456789012345678",
-        userId: "111",
-        hasManageGuildPermission: true,
-        bossIndex,
-        startIndex: 0,
-        endIndex: 3,
-        values: hpValues[bossIndex],
-      });
-    }
+    const afterHp = service.submitHp({
+      guildId: "123456789012345678",
+      userId: "111",
+      hasManageGuildPermission: true,
+      bossIndex: -1,
+      startIndex: 0,
+      endIndex: 3,
+      values: hpRows,
+    });
 
-    expect(lastResult.view?.kind).toBe("confirm");
-    expect(lastResult.content).toContain("入力が完了しました。保存前プレビュー:");
+    expect(afterHp.view?.kind).toBe("menu");
+    expect(afterHp.content).toContain("HPを下書きに反映しました");
+
+    const preview = service.previewSave({
+      guildId: "123456789012345678",
+      userId: "111",
+      hasManageGuildPermission: true,
+    });
+
+    expect(preview.view?.kind).toBe("confirm");
+    expect(preview.content).toContain("入力が完了しました。保存前プレビュー:");
 
     const saved = service.save({
       guildId: "123456789012345678",
@@ -316,7 +297,7 @@ describe("BossInfoService", () => {
     });
 
     expect(invalid.kind).toBe("message");
-    expect(invalid.view).toBeUndefined();
+    expect(invalid.view?.kind).toBe("menu");
     expect(phaseModal).toMatchObject({
       kind: "modal",
       fields: [{ defaultValue: "3" }],
@@ -360,7 +341,7 @@ describe("BossInfoService", () => {
     });
 
     expect(invalid.kind).toBe("message");
-    expect(invalid.view).toBeUndefined();
+    expect(invalid.view?.kind).toBe("boundary");
     expect(boundaryModal).toMatchObject({
       kind: "modal",
       fields: [
@@ -418,13 +399,13 @@ describe("BossInfoService", () => {
     });
 
     expect(invalid.kind).toBe("message");
-    expect(invalid.view).toBeUndefined();
+    expect(invalid.view?.kind).toBe("hp");
     expect(hpModal).toMatchObject({
       kind: "modal",
       fields: [
-        { defaultValue: "1200" },
-        { defaultValue: "5000" },
-        { defaultValue: "100000" },
+        { defaultValue: "1200 1500 2000 2300 3000" },
+        { defaultValue: "5000 5600 6400 7000 8500" },
+        { defaultValue: "100000 104000 108000 112000 116000" },
         { defaultValue: "" },
       ],
     });

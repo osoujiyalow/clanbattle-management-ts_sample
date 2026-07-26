@@ -1,12 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { AttackStatus } from "../../../src/domain/attack-status.js";
 import { AttackType } from "../../../src/domain/attack-type.js";
+import { ClanBattleData } from "../../../src/domain/clan-battle-data.js";
 import { ClanData } from "../../../src/domain/clan-data.js";
+import { GuildBossInfoConfig } from "../../../src/domain/guild-bossinfo-config.js";
 import { CarryOver, PlayerData } from "../../../src/domain/player-data.js";
 import { renderSummaryOverviewEmbed } from "../../../src/renderers/summary-overview-renderer.js";
 
 describe("renderSummaryOverviewEmbed", () => {
+  afterEach(() => {
+    ClanBattleData.deleteGuildConfig("guild-1");
+  });
+
   it("renders the current day remain summary and boss hp overview", () => {
     const alice = new PlayerData({ userId: "300", physicsAttack: 1 });
     const bob = new PlayerData({
@@ -67,11 +73,45 @@ describe("renderSummaryOverviewEmbed", () => {
       title: "3月8日の進行状況",
     });
     expect(embed.description).toContain("残 3凸 1持");
-    expect(embed.description).toContain("1ボス（2周）");
+    expect(embed.description).toContain("1ボス（2周）次段階まで5周");
     expect(embed.description).toContain("500万/1200万");
-    expect(embed.description).toContain("2ボス（1周）");
+    expect(embed.description).toContain("2ボス（1周）次段階まで6周");
     expect(embed.description).toContain("1000万/1500万");
-    expect(embed.description).toContain("5ボス（1周）");
+    expect(embed.description).toContain("5ボス（1周）次段階まで6周");
     expect(embed.description).toContain("0万/3000万");
+  });
+
+  it("uses the guild bossinfo phase for the current boss lap", () => {
+    ClanBattleData.setGuildConfig(
+      "guild-1",
+      new GuildBossInfoConfig({
+        hp: [
+          [100, 200, 300, 400, 500],
+          [600, 700, 800, 900, 1000],
+        ],
+        boundaries: [
+          [1, 1],
+          [2, -1],
+        ],
+      }),
+    );
+
+    const clanData = new ClanData({
+      guildId: "guild-1",
+      categoryId: "200",
+      bossChannelIds: ["11", "12", "13", "14", "15"],
+      remainAttackChannelId: "16",
+      commandChannelId: "18",
+      summaryChannelId: "19",
+      progressMessageIdsByLap: new Map([[2, ["p21", "p22", "p23", "p24", "p25"]]]),
+      date: "2026-03-08",
+    });
+    clanData.initializeBossStatusData(2);
+
+    const embed = renderSummaryOverviewEmbed(clanData).toJSON();
+
+    expect(embed.description).toContain("1ボス（2周）");
+    expect(embed.description).not.toContain("次段階まで");
+    expect(embed.description).toContain("600万/600万");
   });
 });
