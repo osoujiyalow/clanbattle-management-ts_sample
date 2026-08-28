@@ -20,6 +20,7 @@ import {
 } from "discord.js";
 
 import { ATTACK_TYPE_INPUTS } from "../../domain/attack-type.js";
+import { resolveCurrentBossHp } from "../../domain/boss-hp.js";
 import type { BossStatusData } from "../../domain/boss-status-data.js";
 import { ClanBattleData } from "../../domain/clan-battle-data.js";
 import type { ClanData } from "../../domain/clan-data.js";
@@ -327,18 +328,6 @@ function resolveBossStatusData(
   lap = resolveBossLatestLap(clanData, bossIndex),
 ): BossStatusData | undefined {
   return clanData.bossStatusByLap.get(lap)?.[bossIndex];
-}
-
-function resolveCurrentBossHp(bossStatusData: BossStatusData): number {
-  if (bossStatusData.beated) {
-    return 0;
-  }
-
-  const attackedDamage = bossStatusData.attackPlayers.reduce((sum, attackStatus) => {
-    return attackStatus.attacked ? sum + attackStatus.damage : sum;
-  }, 0);
-
-  return Math.max(0, bossStatusData.maxHp - attackedDamage);
 }
 
 function formatNextPhaseText(clanData: ClanData, lap: number): string {

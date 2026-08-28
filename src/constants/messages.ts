@@ -15,6 +15,7 @@ export const COMMAND_DESCRIPTIONS = {
   resendProgressMessage: "進行用のメッセージを再送します。",
   calcCot: "オーバーキルでの持越し時間を計算します",
   adjustRemainAttackCount: "メンバーの残凸数を直接修正します。",
+  hpChange: "このボスの現在HPを修正します。",
   correctAttackKind: "自分の攻撃の本戦・持越区分を入れ替えます。",
   adminCorrectAttackKind: "メンバー指定で攻撃の本戦・持越区分を入れ替えます。",
   tlConvert: "持越秒数ぶんTLの時刻をずらして表示します。",

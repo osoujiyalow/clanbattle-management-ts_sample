@@ -654,17 +654,16 @@ export class ClanQueryService {
     playerData.battleAttackCount = playerResourceState.battleConsumedCount;
     playerData.carryOverList = this.alignCarryOverListToRemaining(
       this.buildBaseAvailableCarryOvers(attackEntries),
-      playerResourceState.carryAvailableCount,
+      playerResourceState.totalCarryCount,
       clanData.date,
     );
   }
 
   private buildBaseAvailableCarryOvers(attackEntries: readonly AttackEntry[]): CarryOver[] {
-    const committedCarryAttackCount = attackEntries.filter(
+    const consumedCarryAttackCount = attackEntries.filter(
       (attackEntry) =>
         attackEntry.kind === AttackEntryKind.CARRYOVER &&
-        (attackEntry.status === AttackEntryStatus.DECLARED ||
-          attackEntry.status === AttackEntryStatus.FINISHED ||
+        (attackEntry.status === AttackEntryStatus.FINISHED ||
           attackEntry.status === AttackEntryStatus.DEFEATED),
     ).length;
     const producedCarryOvers = attackEntries
@@ -696,7 +695,7 @@ export class ClanQueryService {
       });
 
     return producedCarryOvers.slice(
-      Math.min(committedCarryAttackCount, producedCarryOvers.length),
+      Math.min(consumedCarryAttackCount, producedCarryOvers.length),
     );
   }
 

@@ -111,6 +111,12 @@ export const SLASH_COMMAND_PAYLOADS = [
   },
   {
     type: ApplicationCommandType.ChatInput,
+    name: "hp_change",
+    description: COMMAND_DESCRIPTIONS.hpChange,
+    default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+  },
+  {
+    type: ApplicationCommandType.ChatInput,
     name: "lap",
     description: COMMAND_DESCRIPTIONS.lap,
     options: [

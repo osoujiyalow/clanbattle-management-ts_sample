@@ -86,6 +86,58 @@ describe("renderProgressEmbed", () => {
       },
     });
   });
+
+  it("renders HP decreases and increases as compact correction rows", () => {
+    const clanData = new ClanData({
+      guildId: "100",
+      categoryId: "200",
+      bossChannelIds: ["11", "12", "13", "14", "15"],
+      remainAttackChannelId: "16",
+      commandChannelId: "18",
+      summaryChannelId: "19",
+      progressMessageIdsByLap: new Map([[1, ["a", null, null, null, null]]]),
+    });
+    clanData.initializeBossStatusData(1);
+    const admin = new PlayerData({ userId: "400" });
+    clanData.bossStatusByLap.get(1)?.[0]?.attackPlayers.push(
+      new AttackStatus({
+        playerData: new PlayerData({ userId: "300" }),
+        attackType: AttackType.BATTLE,
+        carryOver: false,
+        damage: 1000,
+        attacked: true,
+      }),
+      new AttackStatus({
+        playerData: admin,
+        attackType: AttackType.HP_ADJUSTMENT,
+        carryOver: false,
+        damage: 266,
+        attacked: true,
+      }),
+      new AttackStatus({
+        playerData: admin,
+        attackType: AttackType.HP_ADJUSTMENT,
+        carryOver: false,
+        damage: -500,
+        attacked: true,
+      }),
+    );
+
+    const embed = renderProgressEmbed({
+      clanData,
+      lap: 1,
+      bossIndex: 0,
+      displayNamesByUserId: new Map([
+        ["300", "Bob"],
+        ["400", "Alice"],
+      ]),
+    }).toJSON();
+
+    expect(embed.title).toBe("[1周目] 1ボス 434万/1,200万 合計 0万");
+    expect(embed.description).toBe(
+      "(⚔️済み) 1,000万 Bob\n(修正済) -266万 Alice\n(修正済) +500万 Alice\n",
+    );
+  });
   it("falls back to user id when a display name is unavailable", () => {
     const clanData = new ClanData({
       guildId: "100",

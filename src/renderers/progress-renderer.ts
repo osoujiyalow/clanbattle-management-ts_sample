@@ -1,6 +1,8 @@
 import { EmbedBuilder } from "discord.js";
 
 import { BOSS_COLORS, TREASURE_CHEST_URL } from "../constants/colors.js";
+import { AttackType } from "../domain/attack-type.js";
+import { resolveCurrentBossHp } from "../domain/boss-hp.js";
 import { ClanBattleData } from "../domain/clan-battle-data.js";
 import type { ClanData } from "../domain/clan-data.js";
 
@@ -29,7 +31,7 @@ export function renderProgressEmbed(input: ProgressRendererInput): EmbedBuilder 
   );
 
   let totalDamage = 0;
-  let currentHp = bossStatusData.maxHp;
+  const currentHp = resolveCurrentBossHp(bossStatusData);
 
   for (const attackStatus of sortedAttackPlayers) {
     if (!attackStatus.attacked) {
@@ -40,10 +42,16 @@ export function renderProgressEmbed(input: ProgressRendererInput): EmbedBuilder 
       input.displayNamesByUserId.get(attackStatus.playerData.userId) ??
       attackStatus.playerData.userId;
 
+    if (attackStatus.attackType === AttackType.HP_ADJUSTMENT) {
+      const hpDelta = -attackStatus.damage;
+      const sign = hpDelta > 0 ? "+" : "";
+      attackedList.push(`(修正済) ${sign}${formatDamage(hpDelta)}万 ${displayName}`);
+      continue;
+    }
+
     attackedList.push(
       `(${attackStatus.attackType}済み) ${formatDamage(attackStatus.damage)}万 ${displayName}`,
     );
-    currentHp -= attackStatus.damage;
   }
 
   for (const attackStatus of sortedAttackPlayers) {

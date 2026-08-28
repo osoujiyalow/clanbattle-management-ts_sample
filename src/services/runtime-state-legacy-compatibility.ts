@@ -115,7 +115,7 @@ function createDetachedRenderablePlayerData(
 
 function projectLegacyCarryOvers(attackEntries: readonly AttackEntry[]): Map<string, CarryOver[]> {
   const producedCarryOversByUserId = new Map<string, CarryOver[]>();
-  const committedCarryCountByUserId = new Map<string, number>();
+  const consumedCarryCountByUserId = new Map<string, number>();
 
   const getProducedCarryOvers = (userId: string): CarryOver[] => {
     const existing = producedCarryOversByUserId.get(userId);
@@ -145,20 +145,19 @@ function projectLegacyCarryOvers(attackEntries: readonly AttackEntry[]): Map<str
 
     if (
       attackEntry.kind === AttackEntryKind.CARRYOVER &&
-      (attackEntry.status === AttackEntryStatus.DECLARED ||
-        attackEntry.status === AttackEntryStatus.FINISHED ||
+      (attackEntry.status === AttackEntryStatus.FINISHED ||
         attackEntry.status === AttackEntryStatus.DEFEATED)
     ) {
-      committedCarryCountByUserId.set(
+      consumedCarryCountByUserId.set(
         attackEntry.userId,
-        (committedCarryCountByUserId.get(attackEntry.userId) ?? 0) + 1,
+        (consumedCarryCountByUserId.get(attackEntry.userId) ?? 0) + 1,
       );
     }
   }
 
   const userIds = new Set<string>([
     ...producedCarryOversByUserId.keys(),
-    ...committedCarryCountByUserId.keys(),
+    ...consumedCarryCountByUserId.keys(),
   ]);
 
   return new Map(
@@ -166,8 +165,8 @@ function projectLegacyCarryOvers(attackEntries: readonly AttackEntry[]): Map<str
       const producedCarryOvers = [...(producedCarryOversByUserId.get(userId) ?? [])].sort(
         compareCarryOversOldestFirst,
       );
-      const committedCarryCount = committedCarryCountByUserId.get(userId) ?? 0;
-      return [userId, producedCarryOvers.slice(Math.min(committedCarryCount, producedCarryOvers.length))];
+      const consumedCarryCount = consumedCarryCountByUserId.get(userId) ?? 0;
+      return [userId, producedCarryOvers.slice(Math.min(consumedCarryCount, producedCarryOvers.length))];
     }),
   );
 }
@@ -219,7 +218,7 @@ function hasProjectedPlayerStateCoverageForLegacyCompatibility(
   for (const playerData of clanData.playerDataMap.values()) {
     const playerResourceState = playerResourceStateByUserId.get(playerData.userId);
     const expectedBattleCount = playerResourceState?.battleConsumedCount ?? 0;
-    const expectedCarryOverCount = playerResourceState?.carryAvailableCount ?? 0;
+    const expectedCarryOverCount = playerResourceState?.totalCarryCount ?? 0;
     if (
       playerData.battleAttackCount !== expectedBattleCount ||
       playerData.carryOverList.length !== expectedCarryOverCount
@@ -259,7 +258,7 @@ export function rebuildLegacyCompatibilityState(
     playerData.battleAttackCount = playerResourceState?.battleConsumedCount ?? 0;
     playerData.carryOverList = alignLegacyCarryOverListToProjectedCount(
       carryOverProjectionByUserId.get(playerData.userId) ?? [],
-      playerResourceState?.carryAvailableCount ?? 0,
+      playerResourceState?.totalCarryCount ?? 0,
       clanData.date,
     );
   }

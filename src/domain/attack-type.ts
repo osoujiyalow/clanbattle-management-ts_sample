@@ -3,6 +3,7 @@ import { EMOJIS } from "../constants/emojis.js";
 export const AttackType = {
   BATTLE: EMOJIS.physics,
   CARRYOVER: EMOJIS.carryover,
+  HP_ADJUSTMENT: "修正",
 } as const;
 
 export type AttackType = (typeof AttackType)[keyof typeof AttackType];
@@ -39,7 +40,10 @@ export function parseUserFacingAttackType(value: string): CanonicalAttackType | 
 }
 
 export function normalizeAttackType(value: string): CanonicalAttackType | undefined {
-  return parseAttackType(value);
+  const attackType = parseAttackType(value);
+  return attackType === AttackType.BATTLE || attackType === AttackType.CARRYOVER
+    ? attackType
+    : undefined;
 }
 
 export function formatAttackTypeLabel(value: string): string | undefined {

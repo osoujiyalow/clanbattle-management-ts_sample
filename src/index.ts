@@ -5,6 +5,7 @@ import { ActiveAttackerRoleSyncService } from "./discord/active-attacker-role-sy
 import { registerAgentCommandHandlers } from "./discord/command-handlers/agent.js";
 import { registerAttackCommandHandlers } from "./discord/command-handlers/attack.js";
 import { registerBossInfoCommandHandlers } from "./discord/command-handlers/bossinfo.js";
+import { registerHpChangeCommandHandlers } from "./discord/command-handlers/hp-change.js";
 import { registerMemberCommandHandlers } from "./discord/command-handlers/member.js";
 import { registerQueryCommandHandlers } from "./discord/command-handlers/query.js";
 import { registerSetupCommandHandlers } from "./discord/command-handlers/setup.js";
@@ -25,6 +26,7 @@ import { AttackService } from "./services/attack-service.js";
 import { BossInfoService } from "./services/bossinfo-service.js";
 import { ClanQueryService } from "./services/clan-query-service.js";
 import { ClanSetupService } from "./services/clan-setup-service.js";
+import { HpChangeService } from "./services/hp-change-service.js";
 import { MemberService } from "./services/member-service.js";
 import { ProgressMessageService } from "./services/progress-message-service.js";
 import { RuntimeStateService } from "./services/runtime-state-service.js";
@@ -99,6 +101,11 @@ export async function bootstrap(): Promise<void> {
     runtimeStateService,
     guildBossInfoRepository: new GuildBossInfoRepository(database),
   });
+  const hpChangeService = new HpChangeService({
+    database,
+    runtimeStateService,
+    logger,
+  });
   const tlConversionService = new TlConversionService();
 
   registerSetupCommandHandlers(router, { clanSetupService });
@@ -122,6 +129,10 @@ export async function bootstrap(): Promise<void> {
     memberService,
   });
   registerBossInfoCommandHandlers(router, { bossInfoService });
+  registerHpChangeCommandHandlers(router, {
+    hpChangeService,
+    runtimeStateService,
+  });
   registerTlCommandHandlers(router, { tlConversionService });
 
   await bootstrapDiscordRuntime({

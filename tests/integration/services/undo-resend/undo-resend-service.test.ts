@@ -440,6 +440,149 @@ describe("Undo and resend services", () => {
     ]);
   });
 
+  it("does not consume a carryover twice when a finished attack is undone and finished again", async () => {
+    tempPath = createTempSqlitePath();
+    database = openSqliteDatabase({ filePath: tempPath.filePath });
+    createCoreRepositorySchema(database);
+
+    const progressionStart = new Date("2026-03-08T06:00:00+09:00").getTime();
+    let progressionOffsetMs = 0;
+    const progressionClock = {
+      now: () => new Date(progressionStart + progressionOffsetMs++ * 1_000),
+    };
+
+    const runtimeStateService = new RuntimeStateService({ database, clock: progressionClock });
+    const service = new AttackService({
+      database,
+      runtimeStateService,
+      clock: progressionClock,
+    });
+
+    const clanData = createClanData();
+    seedLapOneState(database, clanData);
+    const carryOverList = Array.from({ length: 3 }, (_, bossIndex) => {
+      return new CarryOver({
+        attackType: AttackType.BATTLE,
+        bossIndex,
+        created: new Date(`2026-03-08T05:0${bossIndex}:30+09:00`),
+      });
+    });
+    const playerData = new PlayerData({
+      userId: "333",
+      physicsAttack: 3,
+      carryOverList,
+    });
+    seedPlayer(database, clanData, playerData);
+
+    const attackEntryRepository = new AttackEntryRepository(database);
+    carryOverList.forEach((carryOver, bossIndex) => {
+      attackEntryRepository.insert(
+        new AttackEntry({
+          attackEntryId: `produced-carry-${bossIndex}`,
+          categoryId: clanData.categoryId,
+          userId: playerData.userId,
+          dayKey: clanData.date,
+          lap: 1,
+          bossIndex,
+          kind: AttackEntryKind.BATTLE,
+          status: AttackEntryStatus.DEFEATED,
+          declaredAt: new Date(`2026-03-08T05:0${bossIndex}:00+09:00`),
+          resolvedAt: carryOver.created,
+        }),
+      );
+    });
+
+    runtimeStateService.set(clanData);
+    runtimeStateService.syncProjectedStateForCategory(
+      clanData.categoryId,
+      clanData.date,
+      progressionClock.now(),
+    );
+
+    const nextId = createSnowflakeFactory();
+    const bossOneChannel = new FakeTextChannel(clanData.bossChannelIds[0]!, nextId);
+    const bossTwoChannel = new FakeTextChannel(clanData.bossChannelIds[1]!, nextId);
+    const summaryChannel = new FakeTextChannel(clanData.summaryChannelId, nextId);
+    const remainChannel = new FakeTextChannel(clanData.remainAttackChannelId, nextId);
+    bossOneChannel.attachMessage(new FakeMessage("111"));
+    bossTwoChannel.attachMessage(new FakeMessage("112"));
+    summaryChannel.attachMessage(new FakeMessage("211"));
+    remainChannel.attachMessage(new FakeMessage(clanData.remainAttackMessageId!));
+
+    const gateway = new FakeDiscordGateway();
+    [bossOneChannel, bossTwoChannel, summaryChannel, remainChannel].forEach((channel) =>
+      gateway.registerChannel(channel),
+    );
+    const commonRequest = {
+      categoryId: clanData.categoryId,
+      member: { id: playerData.userId, displayName: "Alice" },
+      discordGateway: gateway,
+      displayNamesByUserId: new Map([[playerData.userId, "Alice"]]),
+    };
+
+    await service.declare({
+      ...commonRequest,
+      channelId: clanData.bossChannelIds[0]!,
+      attackType: ATTACK_TYPE_INPUTS.CARRYOVER,
+      responseChannel: new FakeTextChannel("declare-boss1", nextId),
+    });
+    await service.finish({
+      ...commonRequest,
+      channelId: clanData.bossChannelIds[0]!,
+      responseChannel: new FakeTextChannel("finish-boss1", nextId),
+    });
+
+    const undoResult = await service.undo({
+      ...commonRequest,
+      bossNumber: 1,
+      responseChannel: new FakeTextChannel("undo-boss1", nextId),
+    });
+
+    expect(undoResult).toBe(true);
+    expect(playerData.carryOverList).toHaveLength(3);
+    expect(
+      runtimeStateService.getPlayerResourceState(
+        clanData.categoryId,
+        playerData.userId,
+        clanData.date,
+      )?.toRecord(),
+    ).toMatchObject({
+      carryAvailableCount: 2,
+      carryReservedCount: 1,
+    });
+
+    await service.finish({
+      ...commonRequest,
+      channelId: clanData.bossChannelIds[0]!,
+      responseChannel: new FakeTextChannel("refinish-boss1", nextId),
+    });
+    await service.declare({
+      ...commonRequest,
+      channelId: clanData.bossChannelIds[1]!,
+      attackType: ATTACK_TYPE_INPUTS.CARRYOVER,
+      responseChannel: new FakeTextChannel("declare-boss2", nextId),
+    });
+    await service.finish({
+      ...commonRequest,
+      channelId: clanData.bossChannelIds[1]!,
+      responseChannel: new FakeTextChannel("finish-boss2", nextId),
+    });
+
+    const carryOverRow = database
+      .prepare<[], { count: bigint }>("select count(*) as count from CarryOver")
+      .get();
+    const resourceState = runtimeStateService.getPlayerResourceState(
+      clanData.categoryId,
+      playerData.userId,
+      clanData.date,
+    );
+
+    expect(playerData.carryOverList).toHaveLength(1);
+    expect(carryOverRow?.count).toBe(1n);
+    expect(resourceState?.carryAvailableCount).toBe(1);
+    expect(resourceState?.carryReservedCount).toBe(0);
+  });
+
   it("undoes a resolved attack for the specified boss even when another boss has newer battle operations", async () => {
     tempPath = createTempSqlitePath();
     database = openSqliteDatabase({ filePath: tempPath.filePath });

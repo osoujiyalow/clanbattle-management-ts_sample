@@ -111,7 +111,8 @@ describe("runtime-state-legacy-compatibility", () => {
           userId: playerData.userId,
           dayKey: "2026-03-28",
           battleConsumedCount: 2,
-          carryAvailableCount: 1,
+          carryAvailableCount: 0,
+          carryReservedCount: 1,
         }),
       ],
     );

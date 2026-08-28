@@ -127,6 +127,7 @@ node dist/index.js
 | `/bossinfo_show` | サーバーごとのボスHP/段階設定を表示します。 |
 | `/bossinfo_export_json` | ボスHP/段階設定をJSONで出力します。 |
 | `/bossinfo_edit` | ボスHP/段階設定をウィザードで編集します。 |
+| `/hp_change` | 管理者がボスチャンネルから現在HPを修正します。 |
 | `/adjust_remain_attack_count` | メンバーの残凸数を直接修正します。 |
 | `/correct_attack_kind` | 自分の攻撃の本戦・持越区分を入れ替えます。 |
 | `/admin_correct_attack_kind` | メンバー指定で攻撃の本戦・持越区分を入れ替えます。 |

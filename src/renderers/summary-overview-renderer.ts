@@ -1,6 +1,6 @@
 import { EmbedBuilder } from "discord.js";
 
-import type { BossStatusData } from "../domain/boss-status-data.js";
+import { resolveCurrentBossHp } from "../domain/boss-hp.js";
 import { ClanBattleData } from "../domain/clan-battle-data.js";
 import type { ClanData } from "../domain/clan-data.js";
 
@@ -29,18 +29,6 @@ function resolveBossLatestLap(clanData: ClanData, bossIndex: number): number {
   }
 
   return 1;
-}
-
-function resolveCurrentBossHp(bossStatusData: BossStatusData): number {
-  if (bossStatusData.beated) {
-    return 0;
-  }
-
-  const attackedDamage = bossStatusData.attackPlayers.reduce((sum, attackStatus) => {
-    return attackStatus.attacked ? sum + attackStatus.damage : sum;
-  }, 0);
-
-  return Math.max(0, bossStatusData.maxHp - attackedDamage);
 }
 
 function buildBossSummaryBlock(clanData: ClanData, bossIndex: number): string {

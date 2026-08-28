@@ -1411,7 +1411,7 @@ export class AttackService {
 
     return (
       playerData.battleAttackCount === projectedState.battleConsumedCount &&
-      playerData.carryOverList.length === projectedState.carryAvailableCount
+      playerData.carryOverList.length === projectedState.totalCarryCount
     );
   }
 
@@ -1490,11 +1490,10 @@ export class AttackService {
     playerData: PlayerData,
     attackEntries: readonly AttackEntry[],
   ): void {
-    const committedCarryAttackEntries = attackEntries.filter(
+    const consumedCarryAttackEntries = attackEntries.filter(
       (attackEntry) =>
         attackEntry.kind === AttackEntryKind.CARRYOVER &&
-        (attackEntry.status === AttackEntryStatus.DECLARED ||
-          attackEntry.status === AttackEntryStatus.FINISHED ||
+        (attackEntry.status === AttackEntryStatus.FINISHED ||
           attackEntry.status === AttackEntryStatus.DEFEATED),
     );
     const producedCarryOvers = attackEntries
@@ -1520,7 +1519,7 @@ export class AttackService {
           attackEntry.status === AttackEntryStatus.DEFEATED),
     ).length;
     playerData.carryOverList = producedCarryOvers.slice(
-      Math.min(committedCarryAttackEntries.length, producedCarryOvers.length),
+      Math.min(consumedCarryAttackEntries.length, producedCarryOvers.length),
     );
   }
 

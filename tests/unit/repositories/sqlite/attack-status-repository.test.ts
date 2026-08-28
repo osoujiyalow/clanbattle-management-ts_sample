@@ -103,6 +103,40 @@ describe("AttackStatusRepository", () => {
     }
   });
 
+  it("persists an HP correction by an unmanaged actor across reloads", () => {
+    tempPath = createTempSqlitePath();
+    const database = openSqliteDatabase({ filePath: tempPath.filePath });
+
+    try {
+      createCoreRepositorySchema(database);
+      const repository = new AttackStatusRepository(database);
+      repository.insert(
+        "200",
+        7,
+        2,
+        new AttackStatus({
+          playerData: new PlayerData({ userId: "400" }),
+          attackType: AttackType.HP_ADJUSTMENT,
+          carryOver: false,
+          damage: -500,
+          attacked: true,
+          created: new Date("2026-03-07T21:34:56.789+09:00"),
+        }),
+      );
+
+      const loaded = repository.findAllGroupedByCategory(new Map()).get("200")?.get(7)?.get(2)?.[0];
+      expect(loaded).toMatchObject({
+        attackType: AttackType.HP_ADJUSTMENT,
+        damage: -500,
+        attacked: true,
+        carryOver: false,
+      });
+      expect(loaded?.playerData.userId).toBe("400");
+    } finally {
+      closeSqliteDatabase(database);
+    }
+  });
+
   it("deletes all statuses for a category", () => {
     tempPath = createTempSqlitePath();
     const database = openSqliteDatabase({ filePath: tempPath.filePath });

@@ -120,6 +120,7 @@ describe("discord bootstrap", () => {
       ["bossinfo_show", "サーバーごとのボスHP/段階設定を表示します。"],
       ["bossinfo_export_json", "このサーバーのボスHP/段階設定をJSONで出力します。"],
       ["bossinfo_edit", "サーバーごとのボスHP/段階設定をウィザードで編集します。"],
+      ["hp_change", "このボスの現在HPを修正します。"],
       ["lap", "周回数を変更します"],
       ["agent", "代理操作パネルを表示します。"],
       ["attack_declare", "ボスに凸宣言した時の処理を実施します"],
@@ -133,7 +134,7 @@ describe("discord bootstrap", () => {
       ["correct_attack_kind", "自分の攻撃の本戦・持越区分を入れ替えます。"],
       ["admin_correct_attack_kind", "メンバー指定で攻撃の本戦・持越区分を入れ替えます。"],
     ]);
-    expect(SLASH_COMMAND_PAYLOADS).toHaveLength(18);
+    expect(SLASH_COMMAND_PAYLOADS).toHaveLength(19);
     expect(SLASH_COMMAND_PAYLOADS.find((payload) => payload.name === "time")?.options).toEqual([
       {
         type: 3,
